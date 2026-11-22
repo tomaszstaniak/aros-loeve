@@ -1,0 +1,320 @@
+Title: AROS file system: PhysFS platform layer and AmigaDOS paths
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-19
+Author: aros-loeve project
+Problem: PhysFS has no AROS platform, so love.filesystem did not start ("Failed to initialize filesystem"). LÖVE and PhysFS also assume Unix or Windows paths: std::filesystem and the start-up script do not understand "Volume:drawer/file", and "Volume:" + "/name" names the parent of a volume in AmigaDOS.
+Change: New physfs_platform_aros.c: program drawer from GetProgramDir, ENVARC: as the place for a program's own files; POSIX calls stay in physfs_platform_posix.c (its getpwuid lookup is left out on AROS). The directory archiver does not add "/" after "Volume:". LÖVE: full names through Lock and NameFromLock instead of std::filesystem, save directories in ENVARC:LOVE/<game>, parent drawers of "Volume:a/b", and the start-up script takes "Volume:name" as absolute with the leaf "name".
+Scope: AROS (all targets); no effect elsewhere
+Upstream: candidate (the PhysFS part for icculus/physfs, the rest for love2d/love)
+Verification: Built for mainline AROS x86_64 (GCC 10.5, SDK nightly 20261110) with no implicit function declarations; LÖVE 12.0 ran a test game on pool v1-3 (exec 51.17, softpipe) on 2026-11-19: window, canvas, shader, shapes and a clean exit, seven screen pixels exact
+Removal: None planned.
+---
+diff --git a/src/libraries/physfs/physfs_archiver_dir.c b/src/libraries/physfs/physfs_archiver_dir.c
+index 61c0da3f1621c7fc9249e58736c14c954ebd40c4..024eeb619bf52fa225fb3a755ccdec4bda608993 100644
+--- a/src/libraries/physfs/physfs_archiver_dir.c
++++ b/src/libraries/physfs/physfs_archiver_dir.c
+@@ -61,7 +61,12 @@ static void *DIR_openArchive(PHYSFS_Io *io, const char *name,
+     strcpy(retval, name);
+ 
+     /* make sure there's a dir separator at the end of the string */
++#ifdef __AROS__
++    /* "Volume:" already takes a name after it; "Volume:/" is its parent. */
++    if ((retval[namelen - 1] != dirsep) && (retval[namelen - 1] != ':'))
++#else
+     if (retval[namelen - 1] != dirsep)
++#endif
+     {
+         retval[namelen] = dirsep;
+         retval[namelen + 1] = '\0';
+diff --git a/src/libraries/physfs/physfs_platform_aros.c b/src/libraries/physfs/physfs_platform_aros.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ed063af7acfc273f13ca7e245ef0f7a9a488e0f
+--- /dev/null
++++ b/src/libraries/physfs/physfs_platform_aros.c
+@@ -0,0 +1,86 @@
++/*
++ * AROS support routines for PhysicsFS.
++ *
++ * Files, directories and locks go through the POSIX calls of posixc
++ * (physfs_platform_posix.c). This file supplies the places that have no POSIX
++ * answer on AROS: where the program is, and where a program keeps its files.
++ *
++ * Please see the file LICENSE.txt in the source's root directory.
++ */
++
++#define __PHYSICSFS_INTERNAL__
++#include "physfs_platforms.h"
++
++#ifdef PHYSFS_PLATFORM_AROS
++
++#include <string.h>
++
++#include <proto/dos.h>
++
++#include "physfs_internal.h"
++
++int __PHYSFS_platformInit(void)
++{
++    return 1;  /* always succeed. */
++} /* __PHYSFS_platformInit */
++
++
++void __PHYSFS_platformDeinit(void)
++{
++    /* no-op */
++} /* __PHYSFS_platformDeinit */
++
++
++void __PHYSFS_platformDetectAvailableCDs(PHYSFS_StringCallback cb, void *data)
++{
++    /* no-op: volumes are not listed. */
++} /* __PHYSFS_platformDetectAvailableCDs */
++
++
++/* A copy of an AmigaDOS path that further names can be appended to: it ends
++   in ':' (a volume or assign) or in '/'. */
++static char *dirWithSeparator(const char *path)
++{
++    const size_t len = strlen(path);
++    char *retval = (char *) allocator.Malloc(len + 2);
++    BAIL_IF(!retval, PHYSFS_ERR_OUT_OF_MEMORY, NULL);
++    strcpy(retval, path);
++    if ((len > 0) && (retval[len - 1] != ':') && (retval[len - 1] != '/'))
++    {
++        retval[len] = '/';
++        retval[len + 1] = '\0';
++    } /* if */
++    return retval;
++} /* dirWithSeparator */
++
++
++char *__PHYSFS_platformCalcBaseDir(const char *argv0)
++{
++    char buf[1024];
++    BAIL_IF(!NameFromLock(GetProgramDir(), (STRPTR) buf, sizeof (buf)),
++            PHYSFS_ERR_OS_ERROR, NULL);
++    return dirWithSeparator(buf);
++} /* __PHYSFS_platformCalcBaseDir */
++
++
++char *__PHYSFS_platformCalcUserDir(void)
++{
++    /* AROS has no per-user home directory: the system volume stands in. */
++    return dirWithSeparator("SYS:");
++} /* __PHYSFS_platformCalcUserDir */
++
++
++char *__PHYSFS_platformCalcPrefDir(const char *org, const char *app)
++{
++    /* Programs keep their own files in a drawer of ENVARC:. */
++    const char *base = "ENVARC:";
++    const size_t len = strlen(base) + strlen(app) + 2;
++    char *retval = (char *) allocator.Malloc(len);
++    BAIL_IF(!retval, PHYSFS_ERR_OUT_OF_MEMORY, NULL);
++    snprintf(retval, len, "%s%s/", base, app);
++    return retval;
++} /* __PHYSFS_platformCalcPrefDir */
++
++#endif /* PHYSFS_PLATFORM_AROS */
++
++/* end of physfs_platform_aros.c ... */
+diff --git a/src/libraries/physfs/physfs_platform_posix.c b/src/libraries/physfs/physfs_platform_posix.c
+index 7ba5e10708ccde43e4f47a9a2dcfafb81fe178b7..c17928c377c1c0652686c7abb15eebc2c917dd61 100644
+--- a/src/libraries/physfs/physfs_platform_posix.c
++++ b/src/libraries/physfs/physfs_platform_posix.c
+@@ -56,6 +56,7 @@ static inline PHYSFS_ErrorCode errcodeFromErrno(void)
+ } /* errcodeFromErrno */
+ 
+ 
++#ifndef PHYSFS_PLATFORM_AROS  /* physfs_platform_aros.c has its own. */
+ static char *getUserDirByUID(void)
+ {
+     uid_t uid = getuid();
+@@ -114,6 +115,7 @@ char *__PHYSFS_platformCalcUserDir(void)
+ 
+     return retval;
+ } /* __PHYSFS_platformCalcUserDir */
++#endif /* !PHYSFS_PLATFORM_AROS */
+ 
+ 
+ PHYSFS_EnumerateCallbackResult __PHYSFS_platformEnumerate(const char *dirname,
+diff --git a/src/libraries/physfs/physfs_platforms.h b/src/libraries/physfs/physfs_platforms.h
+index 1ac17d9c6fcce48f2abd2bbd32227cd02f227b05..7149c3d92d5a97f56512e5e1487b40558a0ef40e 100644
+--- a/src/libraries/physfs/physfs_platforms.h
++++ b/src/libraries/physfs/physfs_platforms.h
+@@ -66,6 +66,11 @@
+ #  define PHYSFS_NO_CDROM_SUPPORT 1
+ #  define PHYSFS_PLATFORM_UNIX 1
+ #  define PHYSFS_PLATFORM_POSIX 1
++#elif defined(__AROS__)
++/* posixc supplies the POSIX calls; physfs_platform_aros.c the rest. */
++#  define PHYSFS_NO_CDROM_SUPPORT 1
++#  define PHYSFS_PLATFORM_AROS 1
++#  define PHYSFS_PLATFORM_POSIX 1
+ #elif defined(__QNX__)
+ #  define PHYSFS_PLATFORM_QNX 1
+ #  define PHYSFS_PLATFORM_POSIX 1
+diff --git a/src/modules/filesystem/Filesystem.cpp b/src/modules/filesystem/Filesystem.cpp
+index 9f188d20b03fe7b41dbd00ee4b5e9b69dbca6484..38a7f331be563fe2d45ed0ab7e010dc8a3f52c9b 100644
+--- a/src/modules/filesystem/Filesystem.cpp
++++ b/src/modules/filesystem/Filesystem.cpp
+@@ -37,6 +37,8 @@
+ #include "common/utf8.h"
+ #elif defined(LOVE_LINUX)
+ #include <unistd.h>
++#elif defined(LOVE_AROS)
++#include <proto/dos.h>
+ #endif
+ 
+ // C++17 std::filesystem
+@@ -132,6 +134,11 @@ static bool getContainingDirectory(const std::string &path, std::string &newpath
+ 
+ 	newpath = path.substr(0, index);
+ 
++#ifdef LOVE_AROS
++	// "Volume:drawer" is still below the root, which is "Volume:".
++	return !newpath.empty() && newpath.back() != ':';
++#endif
++
+ 	// Bail if the root has been stripped out.
+ 	return newpath.find_first_of("/\\") != std::string::npos;
+ }
+@@ -193,6 +200,19 @@ bool Filesystem::createRealDirectory(const std::string &path)
+ 
+ std::string Filesystem::canonicalizeRealPath(const std::string &p) const
+ {
++#ifdef LOVE_AROS
++	// AmigaDOS paths ("Volume:drawer/file", assigns, names relative to the
++	// current drawer) are not what std::filesystem understands. The system
++	// gives the full name of anything that exists; other paths stay as given.
++	BPTR lock = Lock((STRPTR) p.c_str(), SHARED_LOCK);
++	if (lock == BNULL)
++		return p;
++
++	char buffer[2048] = {0};
++	bool ok = NameFromLock(lock, (STRPTR) buffer, sizeof(buffer)) != 0;
++	UnLock(lock);
++	return ok ? std::string(buffer) : p;
++#else
+ 	try
+ 	{
+ 		return std::filesystem::weakly_canonical(p).string();
+@@ -201,6 +221,7 @@ std::string Filesystem::canonicalizeRealPath(const std::string &p) const
+ 	{
+ 		return p;
+ 	}
++#endif
+ }
+ 
+ std::string Filesystem::getExecutablePath() const
+@@ -226,6 +247,21 @@ std::string Filesystem::getExecutablePath() const
+ 
+ 	return std::string(buffer, len);
+ 
++#elif defined(LOVE_AROS)
++
++	// The program's drawer plus the name it was started under.
++	char buffer[2048] = {0};
++	char name[256] = {0};
++
++	if (!NameFromLock(GetProgramDir(), (STRPTR) buffer, sizeof(buffer)))
++		return "";
++	if (!GetProgramName((STRPTR) name, sizeof(name)))
++		return "";
++	if (!AddPart((STRPTR) buffer, FilePart((STRPTR) name), sizeof(buffer)))
++		return "";
++
++	return std::string(buffer);
++
+ #else
+ #error Missing implementation for Filesystem::getExecutablePath!
+ #endif
+diff --git a/src/modules/filesystem/Filesystem.h b/src/modules/filesystem/Filesystem.h
+index 14d292949e4561955d029976720675f6ad1712be..327f0a36bc73727848374b33ec15107fa785cec9 100644
+--- a/src/modules/filesystem/Filesystem.h
++++ b/src/modules/filesystem/Filesystem.h
+@@ -45,6 +45,8 @@
+ #		define LOVE_APPDATA_FOLDER "LOVE"
+ #	elif defined(LOVE_LINUX)
+ #		define LOVE_APPDATA_FOLDER "love"
++#	elif defined(LOVE_AROS)
++#		define LOVE_APPDATA_FOLDER "LOVE"
+ #	else
+ #		define LOVE_APPDATA_PREFIX "."
+ #		define LOVE_APPDATA_FOLDER "love"
+diff --git a/src/modules/filesystem/physfs/Filesystem.cpp b/src/modules/filesystem/physfs/Filesystem.cpp
+index b32d06654afc0246f7ad39775cedc8dd32a872df..5ae6467335ffae0ac1be9f492fab2fd2f1ebc937 100644
+--- a/src/modules/filesystem/physfs/Filesystem.cpp
++++ b/src/modules/filesystem/physfs/Filesystem.cpp
+@@ -611,6 +611,12 @@ std::string Filesystem::getFullCommonPath(CommonPath path)
+ 		else
+ 			suffix = std::string(LOVE_PATH_SEPARATOR LOVE_APPDATA_FOLDER LOVE_PATH_SEPARATOR) + saveIdentity;
+ 
++#ifdef LOVE_AROS
++		// "Volume:" takes a name directly: "Volume:/name" would be its parent.
++		if (rootpath.back() == ':')
++			suffix = suffix.substr(1);
++#endif
++
+ 		// TODO: do we still need the normalize?
+ 		fullPaths[path] = normalize(rootpath + suffix);
+ 		fullPaths[path] = canonicalizeRealPath(fullPaths[path].c_str());
+@@ -736,6 +742,29 @@ std::string Filesystem::getFullCommonPath(CommonPath path)
+ 		break;
+ 	}
+ 
++#elif defined(LOVE_AROS)
++
++	// AROS has no per-user folders. Programs keep their own files in ENVARC:,
++	// so save directories are ENVARC:LOVE/<game>; the system volume stands in
++	// for the home, desktop and documents folders.
++	switch (path)
++	{
++	case COMMONPATH_APP_SAVEDIR:
++	case COMMONPATH_APP_DOCUMENTS:
++		// Handled above.
++		break;
++	case COMMONPATH_USER_APPDATA:
++		fullPaths[path] = "ENVARC:";
++		break;
++	case COMMONPATH_USER_HOME:
++	case COMMONPATH_USER_DESKTOP:
++	case COMMONPATH_USER_DOCUMENTS:
++		fullPaths[path] = "SYS:";
++		break;
++	case COMMONPATH_MAX_ENUM:
++		break;
++	}
++
+ #endif
+ 
+ 	if (!fullPaths[path].empty())
+diff --git a/src/modules/love/arg.lua b/src/modules/love/arg.lua
+index 8257d03d584eeb6aca3115fe96314f68f00e63ce..788da2c9a139a85db1c0056e1b6f25215353f9eb 100644
+--- a/src/modules/love/arg.lua
++++ b/src/modules/love/arg.lua
+@@ -59,6 +59,11 @@ function love.path.abs(p)
+ 		return true
+ 	end
+ 
++	-- AROS: a volume or assign name followed by a colon.
++	if love._os == "AROS" and tmp:find("^[^/:]*:") then
++		return true
++	end
++
+ 	-- Relative.
+ 	return false
+ 
+@@ -86,6 +91,10 @@ function love.path.leaf(p)
+ 		end
+ 	end
+ 
++	-- AROS: "Volume:name" has the leaf "name".
++	if love._os == "AROS" then
++		last = last:match("^[^:]*:(.+)$") or last
++	end
+ 	return last
+ end
+ 

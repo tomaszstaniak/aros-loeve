@@ -1,0 +1,44 @@
+Title: Tracker music through libmodplug
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-20
+Author: aros-loeve project
+Problem: The AROS build left out libmodplug (patch 0003), so games with tracker music (MOD, S3M, XM, IT) had none: love.sound.newDecoder failed for these files.
+Change: libmodplug 0.8.9.0 is built with the other libraries (scripts/deps.py; version and options of AROS contrib's recipe) and linked statically; LOVE_NO_MODPLUG is no longer set on AROS and the build looks for libmodplug again.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64 (nightly 2026-11-15), 2026-11-20: a generated 4-channel module with a rising scale opens as 44100 Hz stereo, duration 8.00 s, and plays as a stream; the emulated sound card's recorded output holds 8 s of signal whose pitch rises from about 290 to 500 Hz second by second. Not run: Raspberry Pi, formats other than MOD.
+Removal: not planned
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 240e9d7b78a3d15bf13c764d03d545f03da68f20..c543743ddb460cdb81da8b937320edfebfedc6e2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -203,10 +203,11 @@ Please see https://github.com/love2d/megasource
+ 		target_link_libraries(lovedep::OpenAL INTERFACE SDL3::SDL3)
+ 	endif()
+ 
+-	if(NOT LOVE_AROS)
+ 	find_package(ModPlug REQUIRED)
+ 	target_include_directories(lovedep::Modplug INTERFACE ${MODPLUG_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::Modplug INTERFACE ${MODPLUG_LIBRARY})
++	if(LOVE_AROS)
++		target_compile_definitions(lovedep::Modplug INTERFACE MODPLUG_STATIC)
+ 	endif()
+ 
+ 	find_package(Theora REQUIRED)
+diff --git a/src/common/config.h b/src/common/config.h
+index 45adc2d60c931f3c9385758d7f01ff7260d5ce5c..1ea8e29c7a2464ba666ef5fbbe8e4fb03bdffbea 100644
+--- a/src/common/config.h
++++ b/src/common/config.h
+@@ -48,8 +48,7 @@
+ #endif
+ #if defined(__AROS__)
+ #	define LOVE_AROS 1
+-// Not built for AROS yet: libmodplug, the network libraries.
+-#	define LOVE_NO_MODPLUG 1
++// Not built for AROS yet: the network libraries.
+ #endif
+ #if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+ // I know it's not linux, but it seems most "linux-only" code is bsd-compatible

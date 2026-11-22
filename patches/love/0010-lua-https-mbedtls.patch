@@ -1,0 +1,635 @@
+Title: lua-https over Mbed TLS
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-21
+Author: aros-loeve project
+Problem: lua-https (require "https") was left out on AROS: its backends are the system HTTP clients of other platforms, curl or OpenSSL loaded at run time, and its plain connection uses C library socket calls AROS does not have. Games that fetch data over HTTPS could not.
+Change: New backend MbedTLSConnection for AROS on Mbed TLS from the aros-crypto kit (CMake option AROS_CRYPTO_KIT, linked statically). src/libraries/aros/aros_net.c opens TCP connections through the calling thread's bsdsocket.library base and runs TLS over them: the server chain is checked against the system CA bundle ENV:SYS/Certificates/ca-bundle.crt and has to name the host; without the bundle, without a working random number source or with a certificate that fails the check the request fails (status 0) and the reason goes to stderr. Mbed TLS gets its locks before main(). PlaintextConnection uses the same TCP calls on AROS. LOVE_ENABLE_LUAHTTPS is on for AROS.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64 (nightly 2026-11-15, exec 51.17, pool slot v1-3), 2026-11-21, check game docs/evidence/2026-11-21-https/hgame: https://example.com/ 200 from the main thread and from a love.thread, https://www.wikipedia.org/ answers (403, it wants a User-Agent), expired, wrong-host and self-signed certificates of badssl.com refused with the reason printed, http://example.com/ 200; the game exits cleanly. Not run: Raspberry Pi, a system without a network stack or without the CA bundle, POST with a body, large downloads.
+Removal: not planned
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 08b28d1d4738bbc002a695d8b8c6b4be1a11384f..5a8f7f0433761cbc4f7b96d661d0d6a4d1ebd971 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2004,8 +2004,22 @@ if(LOVE_AROS)
+ 		src/libraries/luasocket/libluasocket/unixdgram.c
+ 		src/libraries/luasocket/libluasocket/unixstream.c
+ 		PROPERTIES HEADER_FILE_ONLY ON)
+-	set_target_properties(love_3p_luahttps PROPERTIES EXCLUDE_FROM_ALL ON)
+-	list(APPEND LIBLOVE_LIBRARIES love_3p_enet love_3p_luasocket love_3p_arossocket)
++	# lua-https: connections through bsdsocket.library, TLS from the
++	# aros-crypto kit (Mbed TLS), given as AROS_CRYPTO_KIT.
++	if(NOT AROS_CRYPTO_KIT)
++		message(FATAL_ERROR "AROS_CRYPTO_KIT: the aros-crypto kit is needed for lua-https")
++	endif()
++	target_sources(love_3p_luahttps PRIVATE
++		src/libraries/aros/aros_net.c
++		src/libraries/aros/aros_net.h
++		src/libraries/luahttps/src/generic/MbedTLSConnection.cpp
++		src/libraries/luahttps/src/generic/MbedTLSConnection.h
++	)
++	set_source_files_properties(src/libraries/aros/aros_net.c PROPERTIES
++		COMPILE_DEFINITIONS "__CONFIG_ROADSHOW__;MBEDTLS_CONFIG_FILE=<aros_crypto_config.h>"
++		INCLUDE_DIRECTORIES "${AROS_CRYPTO_KIT}/include")
++	target_link_libraries(love_3p_luahttps love_3p_arossocket "${AROS_CRYPTO_KIT}/lib/libaroscrypto.a")
++	list(APPEND LIBLOVE_LIBRARIES love_3p_enet love_3p_luasocket love_3p_luahttps love_3p_arossocket)
+ else()
+ 	list(APPEND LIBLOVE_LIBRARIES love_3p_enet love_3p_luasocket love_3p_luahttps)
+ endif()
+diff --git a/src/common/config.h b/src/common/config.h
+index 70b72517eab87196f5fbc43263ce7f782cb9752b..f728847620aac1a5a775981ce3a7d7e279cfc1d1 100644
+--- a/src/common/config.h
++++ b/src/common/config.h
+@@ -48,7 +48,6 @@
+ #endif
+ #if defined(__AROS__)
+ #	define LOVE_AROS 1
+-// Not built for AROS yet: lua-https.
+ #endif
+ #if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+ // I know it's not linux, but it seems most "linux-only" code is bsd-compatible
+@@ -171,9 +170,7 @@
+ 
+ #	define LOVE_ENABLE_ENET
+ #	define LOVE_ENABLE_LUASOCKET
+-#	ifndef LOVE_AROS
+-#		define LOVE_ENABLE_LUAHTTPS
+-#	endif
++#	define LOVE_ENABLE_LUAHTTPS
+ #	define LOVE_ENABLE_LUA53
+ #endif
+ 
+diff --git a/src/libraries/aros/aros_net.c b/src/libraries/aros/aros_net.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee8f1f5441282f140e44257cd8b405bcb53566b4
+--- /dev/null
++++ b/src/libraries/aros/aros_net.c
+@@ -0,0 +1,306 @@
++/**
++ * TCP and TLS connections on AROS for lua-https. See aros_net.h.
++ **/
++
++#ifdef __AROS__
++
++#include "aros_socket.h"
++#include "aros_net.h"
++
++#include <aros/symbolsets.h>
++#include <dos/dos.h>
++#include <proto/dos.h>
++
++#include <mbedtls/ssl.h>
++#include <mbedtls/entropy.h>
++#include <mbedtls/ctr_drbg.h>
++#include <mbedtls/x509_crt.h>
++#include <psa/crypto.h>
++#include <aros_crypto.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* The CA bundle of the system. */
++#define LOVE_AROS_CAFILE "ENV:SYS/Certificates/ca-bundle.crt"
++
++int love_aros_tcp_connect(const char *host, unsigned short port)
++{
++	struct addrinfo hints, *addrs = NULL, *addr;
++	char service[8];
++	int fd = -1;
++
++	if (!SocketBase)
++		return -1;
++
++	memset(&hints, 0, sizeof(hints));
++	hints.ai_family = AF_UNSPEC;
++	hints.ai_socktype = SOCK_STREAM;
++	snprintf(service, sizeof(service), "%u", (unsigned) port);
++
++	if (getaddrinfo(host, service, &hints, &addrs) != 0)
++		return -1;
++
++	for (addr = addrs; addr; addr = addr->ai_next)
++	{
++		fd = socket(addr->ai_family, SOCK_STREAM, 0);
++		if (fd < 0)
++			continue;
++		if (connect(fd, addr->ai_addr, addr->ai_addrlen) == 0)
++			break;
++		CloseSocket(fd);
++		fd = -1;
++	}
++
++	freeaddrinfo(addrs);
++	return fd;
++}
++
++size_t love_aros_tcp_read(int fd, char *buffer, size_t size)
++{
++	long n = recv(fd, buffer, size, 0);
++	return n < 0 ? 0 : (size_t) n;
++}
++
++size_t love_aros_tcp_write(int fd, const char *buffer, size_t size)
++{
++	long n = send(fd, (void *) buffer, size, 0);
++	return n < 0 ? 0 : (size_t) n;
++}
++
++void love_aros_tcp_close(int fd)
++{
++	if (fd >= 0)
++		CloseSocket(fd);
++}
++
++struct love_aros_tls
++{
++	int fd;
++	mbedtls_ssl_context ssl;
++	mbedtls_ssl_config conf;
++	mbedtls_x509_crt ca;
++	mbedtls_entropy_context entropy;
++	mbedtls_ctr_drbg_context drbg;
++};
++
++/* Mbed TLS gets its locks before main() and before any thread exists. */
++static int tls_ready;
++
++static int love_aros_tls_init(void)
++{
++	aros_crypto_setup();
++	tls_ready = psa_crypto_init() == PSA_SUCCESS;
++	return 1;
++}
++
++static void love_aros_tls_exit(void)
++{
++	mbedtls_psa_crypto_free();
++	aros_crypto_teardown();
++}
++
++ADD2INIT(love_aros_tls_init, 0);
++ADD2EXIT(love_aros_tls_exit, 0);
++
++int love_aros_tls_usable(void)
++{
++	return tls_ready;
++}
++
++static int bio_send(void *ctx, const unsigned char *buffer, size_t size)
++{
++	struct love_aros_tls *tls = (struct love_aros_tls *) ctx;
++	long n = send(tls->fd, (void *) buffer, size, 0);
++	return n < 0 ? MBEDTLS_ERR_SSL_INTERNAL_ERROR : (int) n;
++}
++
++static int bio_recv(void *ctx, unsigned char *buffer, size_t size)
++{
++	struct love_aros_tls *tls = (struct love_aros_tls *) ctx;
++	long n = recv(tls->fd, buffer, size, 0);
++	return n < 0 ? MBEDTLS_ERR_SSL_INTERNAL_ERROR : (int) n;
++}
++
++/* Mbed TLS's file layer is not in the kit. A bundle with certificates Mbed
++   TLS cannot read is used as long as one could be read: the others are then
++   not trusted. */
++static int load_ca(mbedtls_x509_crt *ca, char *why, size_t whysize)
++{
++	BPTR fh = Open((CONST_STRPTR) LOVE_AROS_CAFILE, MODE_OLDFILE);
++	unsigned char *data;
++	LONG size, got;
++	int r;
++
++	if (!fh)
++	{
++		snprintf(why, whysize, "cannot open the CA bundle %s", LOVE_AROS_CAFILE);
++		return 0;
++	}
++
++	Seek(fh, 0, OFFSET_END);
++	size = Seek(fh, 0, OFFSET_BEGINNING);
++	if (size <= 0 || size > 4 * 1024 * 1024 || !(data = (unsigned char *) malloc((size_t) size + 1)))
++	{
++		Close(fh);
++		snprintf(why, whysize, "the CA bundle %s is empty or too large", LOVE_AROS_CAFILE);
++		return 0;
++	}
++
++	got = Read(fh, data, size);
++	Close(fh);
++	if (got != size)
++	{
++		free(data);
++		snprintf(why, whysize, "cannot read the CA bundle %s", LOVE_AROS_CAFILE);
++		return 0;
++	}
++
++	data[size] = 0;
++	r = mbedtls_x509_crt_parse(ca, data, (size_t) size + 1);
++	free(data);
++	if (r < 0 || ca->version == 0)
++	{
++		snprintf(why, whysize, "no usable certificate in the CA bundle %s", LOVE_AROS_CAFILE);
++		return 0;
++	}
++
++	return 1;
++}
++
++struct love_aros_tls *love_aros_tls_connect(const char *host, unsigned short port, char *why, size_t whysize)
++{
++	static const unsigned char pers[] = "love";
++	struct love_aros_tls *tls;
++	int r;
++
++	if (!tls_ready)
++	{
++		snprintf(why, whysize, "no source of random numbers; TLS is not available");
++		return NULL;
++	}
++
++	tls = (struct love_aros_tls *) calloc(1, sizeof(*tls));
++	if (!tls)
++	{
++		snprintf(why, whysize, "out of memory");
++		return NULL;
++	}
++
++	tls->fd = -1;
++	mbedtls_ssl_init(&tls->ssl);
++	mbedtls_ssl_config_init(&tls->conf);
++	mbedtls_x509_crt_init(&tls->ca);
++	mbedtls_entropy_init(&tls->entropy);
++	mbedtls_ctr_drbg_init(&tls->drbg);
++
++	if (mbedtls_ctr_drbg_seed(&tls->drbg, mbedtls_entropy_func, &tls->entropy, pers, sizeof(pers)) != 0)
++	{
++		snprintf(why, whysize, "no source of random numbers; TLS is not available");
++		goto fail;
++	}
++
++	if (!load_ca(&tls->ca, why, whysize))
++		goto fail;
++
++	if (mbedtls_ssl_config_defaults(&tls->conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
++	                                MBEDTLS_SSL_PRESET_DEFAULT) != 0)
++	{
++		snprintf(why, whysize, "TLS setup failed");
++		goto fail;
++	}
++
++	mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
++	mbedtls_ssl_conf_ca_chain(&tls->conf, &tls->ca, NULL);
++	mbedtls_ssl_conf_rng(&tls->conf, mbedtls_ctr_drbg_random, &tls->drbg);
++
++	if (mbedtls_ssl_setup(&tls->ssl, &tls->conf) != 0 || mbedtls_ssl_set_hostname(&tls->ssl, host) != 0)
++	{
++		snprintf(why, whysize, "TLS setup failed");
++		goto fail;
++	}
++
++	tls->fd = love_aros_tcp_connect(host, port);
++	if (tls->fd < 0)
++	{
++		snprintf(why, whysize, "cannot connect to %s", host);
++		goto fail;
++	}
++
++	mbedtls_ssl_set_bio(&tls->ssl, tls, bio_send, bio_recv, NULL);
++
++	while ((r = mbedtls_ssl_handshake(&tls->ssl)) != 0)
++	{
++		uint32_t flags;
++
++		if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
++			continue;
++
++		flags = mbedtls_ssl_get_verify_result(&tls->ssl);
++		if (flags && flags != (uint32_t) -1)
++		{
++			char info[160];
++
++			mbedtls_x509_crt_verify_info(info, sizeof(info), "", flags);
++			info[strcspn(info, "\n")] = 0;
++			snprintf(why, whysize, "certificate of %s refused: %s", host, info);
++		}
++		else
++			snprintf(why, whysize, "TLS handshake with %s failed (-0x%04x)", host, (unsigned) -r);
++		goto fail;
++	}
++
++	return tls;
++
++fail:
++	love_aros_tls_close(tls);
++	return NULL;
++}
++
++size_t love_aros_tls_read(struct love_aros_tls *tls, char *buffer, size_t size)
++{
++	int r;
++
++	for (;;)
++	{
++		r = mbedtls_ssl_read(&tls->ssl, (unsigned char *) buffer, size);
++		if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
++			continue;
++		/* TLS 1.3 sends session tickets after the handshake; not data. */
++		if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)
++			continue;
++		break;
++	}
++
++	return r < 0 ? 0 : (size_t) r;
++}
++
++size_t love_aros_tls_write(struct love_aros_tls *tls, const char *buffer, size_t size)
++{
++	int r;
++
++	do
++		r = mbedtls_ssl_write(&tls->ssl, (const unsigned char *) buffer, size);
++	while (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE);
++
++	return r < 0 ? 0 : (size_t) r;
++}
++
++void love_aros_tls_close(struct love_aros_tls *tls)
++{
++	if (!tls)
++		return;
++
++	if (tls->fd >= 0)
++		mbedtls_ssl_close_notify(&tls->ssl);
++	mbedtls_ssl_free(&tls->ssl);
++	mbedtls_ssl_config_free(&tls->conf);
++	mbedtls_x509_crt_free(&tls->ca);
++	mbedtls_ctr_drbg_free(&tls->drbg);
++	mbedtls_entropy_free(&tls->entropy);
++	love_aros_tcp_close(tls->fd);
++	free(tls);
++}
++
++#endif /* __AROS__ */
+diff --git a/src/libraries/aros/aros_net.h b/src/libraries/aros/aros_net.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..72816f91ff04b14a8e1d90ac4cb8a067c7700c9c
+--- /dev/null
++++ b/src/libraries/aros/aros_net.h
+@@ -0,0 +1,46 @@
++/**
++ * TCP and TLS connections on AROS for lua-https.
++ *
++ * Plain connections go through the calling thread's bsdsocket.library base
++ * (aros_socket.h). TLS is Mbed TLS from the aros-crypto kit: the server's
++ * certificate chain is checked against the system's CA bundle and has to
++ * name the host; a connection that cannot be checked is refused.
++ *
++ * A connection belongs to the thread that opened it.
++ **/
++
++#ifndef LOVE_AROS_NET_H
++#define LOVE_AROS_NET_H
++
++#ifdef __AROS__
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* A connected socket, or -1. */
++int love_aros_tcp_connect(const char *host, unsigned short port);
++/* Bytes moved; 0 at the end of the stream or on an error. */
++size_t love_aros_tcp_read(int fd, char *buffer, size_t size);
++size_t love_aros_tcp_write(int fd, const char *buffer, size_t size);
++void love_aros_tcp_close(int fd);
++
++struct love_aros_tls;
++
++/* Nonzero when TLS can be used: the random number source works. */
++int love_aros_tls_usable(void);
++/* A checked TLS connection, or NULL with the reason in why. */
++struct love_aros_tls *love_aros_tls_connect(const char *host, unsigned short port, char *why, size_t whysize);
++size_t love_aros_tls_read(struct love_aros_tls *tls, char *buffer, size_t size);
++size_t love_aros_tls_write(struct love_aros_tls *tls, const char *buffer, size_t size);
++void love_aros_tls_close(struct love_aros_tls *tls);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __AROS__ */
++
++#endif /* LOVE_AROS_NET_H */
+diff --git a/src/libraries/luahttps/src/common/HTTPS.cpp b/src/libraries/luahttps/src/common/HTTPS.cpp
+index 75697844580ee82987b5b6f9034b8157d1bfaf2c..860f73b7d312dcad9fe3d2c58f5adcd8895e9ed2 100644
+--- a/src/libraries/luahttps/src/common/HTTPS.cpp
++++ b/src/libraries/luahttps/src/common/HTTPS.cpp
+@@ -11,6 +11,9 @@
+ #ifdef HTTPS_BACKEND_OPENSSL
+ #	include "../generic/OpenSSLConnection.h"
+ #endif
++#ifdef HTTPS_BACKEND_MBEDTLS
++#	include "../generic/MbedTLSConnection.h"
++#endif
+ #ifdef HTTPS_BACKEND_SCHANNEL
+ #	include "../windows/SChannelConnection.h"
+ #endif
+@@ -30,6 +33,9 @@
+ #ifdef HTTPS_BACKEND_OPENSSL
+ 	static ConnectionClient<OpenSSLConnection> opensslclient;
+ #endif
++#ifdef HTTPS_BACKEND_MBEDTLS
++	static ConnectionClient<MbedTLSConnection> mbedtlsclient;
++#endif
+ #ifdef HTTPS_BACKEND_SCHANNEL
+ 	static ConnectionClient<SChannelConnection> schannelclient;
+ #endif
+@@ -49,6 +55,9 @@ static HTTPSClient *clients[] = {
+ #endif
+ #ifdef HTTPS_BACKEND_OPENSSL
+ 	&opensslclient,
++#endif
++#ifdef HTTPS_BACKEND_MBEDTLS
++	&mbedtlsclient,
+ #endif
+ 	// WinINet must be above SChannel
+ #ifdef HTTPS_BACKEND_WININET
+diff --git a/src/libraries/luahttps/src/common/PlaintextConnection.cpp b/src/libraries/luahttps/src/common/PlaintextConnection.cpp
+index 95bcd37dc067786303daa46d4c52384ef40ce071..aea5034770889a91a1f8534bd18515d281dfeaaa 100644
+--- a/src/libraries/luahttps/src/common/PlaintextConnection.cpp
++++ b/src/libraries/luahttps/src/common/PlaintextConnection.cpp
+@@ -1,6 +1,8 @@
+ #include "config.h"
+ #include <cstring>
+-#ifndef HTTPS_USE_WINSOCK
++#if defined(__AROS__)
++#	include "../../../aros/aros_net.h"
++#elif !defined(HTTPS_USE_WINSOCK)
+ #	include <netdb.h>
+ #	include <unistd.h>
+ #	include <sys/types.h>
+@@ -32,6 +34,40 @@ PlaintextConnection::PlaintextConnection()
+ #endif // HTTPS_USE_WINSOCK
+ }
+ 
++#ifdef __AROS__
++
++// Sockets are calls into bsdsocket.library; aros_net.c makes them.
++
++PlaintextConnection::~PlaintextConnection()
++{
++	love_aros_tcp_close(fd);
++}
++
++bool PlaintextConnection::connect(const std::string &hostname, uint16_t port)
++{
++	love_aros_tcp_close(fd);
++	fd = love_aros_tcp_connect(hostname.c_str(), port);
++	return fd != -1;
++}
++
++size_t PlaintextConnection::read(char *buffer, size_t size)
++{
++	return love_aros_tcp_read(fd, buffer, size);
++}
++
++size_t PlaintextConnection::write(const char *buffer, size_t size)
++{
++	return love_aros_tcp_write(fd, buffer, size);
++}
++
++void PlaintextConnection::close()
++{
++	love_aros_tcp_close(fd);
++	fd = -1;
++}
++
++#else // __AROS__
++
+ PlaintextConnection::~PlaintextConnection()
+ {
+ 	if (fd != -1)
+@@ -93,6 +129,8 @@ void PlaintextConnection::close()
+ 	fd = -1;
+ }
+ 
++#endif // __AROS__
++
+ int PlaintextConnection::getFd() const
+ {
+ 	return fd;
+diff --git a/src/libraries/luahttps/src/common/config.h b/src/libraries/luahttps/src/common/config.h
+index 97b8200da3360ca8280a0989cd8a9bd112082973..ed3dbd46a0a383704f1e7b7e94930ecd8dfe89f1 100644
+--- a/src/libraries/luahttps/src/common/config.h
++++ b/src/libraries/luahttps/src/common/config.h
+@@ -28,6 +28,10 @@
+ #elif defined(__APPLE__)
+ 	#define HTTPS_BACKEND_NSURL
+ 	#define HTTPS_LIBRARY_LOADER_UNIX
++#elif defined(__AROS__)
++	// Mbed TLS from the aros-crypto kit, linked into the program.
++	#define HTTPS_BACKEND_MBEDTLS
++	#define HTTPS_LIBRARY_LOADER_LINKTIME
+ #elif defined(linux) || defined(__linux) || defined(__linux__)
+ 	#define HTTPS_LIBRARY_LOADER_UNIX
+ 
+diff --git a/src/libraries/luahttps/src/generic/MbedTLSConnection.cpp b/src/libraries/luahttps/src/generic/MbedTLSConnection.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..9785f79086c40c74e32ca9e4eba4bfdefcb4564c
+--- /dev/null
++++ b/src/libraries/luahttps/src/generic/MbedTLSConnection.cpp
+@@ -0,0 +1,52 @@
++#include "MbedTLSConnection.h"
++
++#ifdef HTTPS_BACKEND_MBEDTLS
++
++#include <cstdio>
++
++#include "../../../aros/aros_net.h"
++
++MbedTLSConnection::MbedTLSConnection()
++	: tls(nullptr)
++{
++}
++
++MbedTLSConnection::~MbedTLSConnection()
++{
++	close();
++}
++
++bool MbedTLSConnection::valid()
++{
++	return love_aros_tls_usable() != 0;
++}
++
++bool MbedTLSConnection::connect(const std::string &hostname, uint16_t port)
++{
++	char why[240] = "";
++
++	close();
++	tls = love_aros_tls_connect(hostname.c_str(), port, why, sizeof(why));
++	if (!tls)
++		fprintf(stderr, "https: %s\n", why);
++
++	return tls != nullptr;
++}
++
++size_t MbedTLSConnection::read(char *buffer, size_t size)
++{
++	return tls ? love_aros_tls_read(tls, buffer, size) : 0;
++}
++
++size_t MbedTLSConnection::write(const char *buffer, size_t size)
++{
++	return tls ? love_aros_tls_write(tls, buffer, size) : 0;
++}
++
++void MbedTLSConnection::close()
++{
++	love_aros_tls_close(tls);
++	tls = nullptr;
++}
++
++#endif // HTTPS_BACKEND_MBEDTLS
+diff --git a/src/libraries/luahttps/src/generic/MbedTLSConnection.h b/src/libraries/luahttps/src/generic/MbedTLSConnection.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b07456289659b88f35e8e56406b04f34cc74e13
+--- /dev/null
++++ b/src/libraries/luahttps/src/generic/MbedTLSConnection.h
+@@ -0,0 +1,29 @@
++#pragma once
++
++#include "../common/config.h"
++
++#ifdef HTTPS_BACKEND_MBEDTLS
++
++#include "../common/Connection.h"
++
++struct love_aros_tls;
++
++// TLS through Mbed TLS (AROS). The server's certificate is checked against
++// the system's CA bundle and has to name the host.
++class MbedTLSConnection : public Connection
++{
++public:
++	MbedTLSConnection();
++	virtual bool connect(const std::string &hostname, uint16_t port) override;
++	virtual size_t read(char *buffer, size_t size) override;
++	virtual size_t write(const char *buffer, size_t size) override;
++	virtual void close() override;
++	virtual ~MbedTLSConnection();
++
++	static bool valid();
++
++private:
++	love_aros_tls *tls;
++};
++
++#endif // HTTPS_BACKEND_MBEDTLS

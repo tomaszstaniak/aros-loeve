@@ -1,0 +1,62 @@
+Title: Sound through a statically linked OpenAL Soft
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-20
+Author: aros-loeve project
+Problem: The AROS build had no sound: love.audio used the null backend because OpenAL was not built.
+Change: The OpenAL backend is built on AROS and linked with the static OpenAL Soft from scripts/deps.py (AL_LIBTYPE_STATIC), which plays through SDL3 audio (AHI). LOVE_NO_OPENAL is no longer defined for AROS; libmodplug stays off.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64, 2026-11-20: a generated 440 Hz tone and Mr. Rescue's streamed OGG music are in the recorded output of the emulated AC97 card; static WAV, static OGG and streamed OGG sources play. On systems older than AROS PR #2239 (stdc per-thread errno, merged 2026-11-14) a program that streamed OGG stops the system when it exits; nightly 2026-11-15 does not.
+Removal: when upstream has an AROS build
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f3de39880132424f775e408931698f813e8a7d76..240e9d7b78a3d15bf13c764d03d545f03da68f20 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -194,11 +194,16 @@ Please see https://github.com/love2d/megasource
+ 	target_include_directories(lovedep::Harfbuzz INTERFACE ${HARFBUZZ_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::Harfbuzz INTERFACE ${HARFBUZZ_LIBRARY})
+ 
+-	if(NOT LOVE_AROS)
+ 	find_package(OpenAL REQUIRED)
+ 	target_include_directories(lovedep::OpenAL INTERFACE ${OPENAL_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::OpenAL INTERFACE ${OPENAL_LIBRARY})
++	if(LOVE_AROS)
++		# OpenAL Soft is linked statically and plays through SDL.
++		target_compile_definitions(lovedep::OpenAL INTERFACE AL_LIBTYPE_STATIC)
++		target_link_libraries(lovedep::OpenAL INTERFACE SDL3::SDL3)
++	endif()
+ 
++	if(NOT LOVE_AROS)
+ 	find_package(ModPlug REQUIRED)
+ 	target_include_directories(lovedep::Modplug INTERFACE ${MODPLUG_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::Modplug INTERFACE ${MODPLUG_LIBRARY})
+@@ -388,11 +393,7 @@ target_link_libraries(love_audio INTERFACE
+ 	love_audio_root
+ 	love_audio_null
+ )
+-if(LOVE_AROS)
+-	set_target_properties(love_audio_openal PROPERTIES EXCLUDE_FROM_ALL ON)
+-else()
+-	target_link_libraries(love_audio INTERFACE love_audio_openal)
+-endif()
++target_link_libraries(love_audio INTERFACE love_audio_openal)
+ 
+ #
+ # love.data
+diff --git a/src/common/config.h b/src/common/config.h
+index ad62aca04d60e0e278734ba7aa2f43093368c6cf..45adc2d60c931f3c9385758d7f01ff7260d5ce5c 100644
+--- a/src/common/config.h
++++ b/src/common/config.h
+@@ -48,8 +48,7 @@
+ #endif
+ #if defined(__AROS__)
+ #	define LOVE_AROS 1
+-// Not built for AROS yet: OpenAL audio output, libmodplug, the network libraries.
+-#	define LOVE_NO_OPENAL 1
++// Not built for AROS yet: libmodplug, the network libraries.
+ #	define LOVE_NO_MODPLUG 1
+ #endif
+ #if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)

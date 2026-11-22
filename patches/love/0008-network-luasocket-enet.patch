@@ -1,0 +1,486 @@
+Title: LuaSocket and ENet over bsdsocket.library
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-20
+Author: aros-loeve project
+Problem: The AROS build left out LuaSocket and ENet (patch 0003): require "socket" and require "enet" failed, so games with network play, HTTP requests or a debugger connection could not start. Both libraries expect sockets to be C library descriptors (close, select, fcntl, errno); on AROS sockets belong to bsdsocket.library and to the task that opened it.
+Change: src/libraries/aros gives each thread its own bsdsocket.library base (opened on first use, closed when the thread ends) with its own errno and h_errno, and maps the BSD names to calls through it; the inet_* names that AROS's <arpa/inet.h> renames to missing C library functions go to the library too. LuaSocket's Unix layer and ENet's use it for close, select, non-blocking mode and name lookup (getaddrinfo, getnameinfo of the Roadshow part, built with __CONFIG_ROADSHOW__). Without a running network stack require "socket" and enet's start fail with an error. Unix domain sockets and serial descriptors are left out. lua-https stays out.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64 (nightly 2026-11-15, AROSTCP, QEMU user network), 2026-11-20, one test game: LuaSocket 3.1.0 loads; socket.dns.toip; TCP to a public web server (HTTP/1.1 200 OK) and socket.http (200, 577 bytes); UDP and TCP between two sockets on 127.0.0.1 with socket.select; a refused connection reports "connection refused"; an ENet client and server on 127.0.0.1 connect and pass a packet; a LOVE thread opens its own connection, and the main thread's sockets work after that thread ended; the program exits normally. Not run: Raspberry Pi, a system without a network stack, a socket handed from one thread to another (not supported), long transfers.
+Removal: not planned
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c543743ddb460cdb81da8b937320edfebfedc6e2..08b28d1d4738bbc002a695d8b8c6b4be1a11384f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1985,7 +1985,27 @@ set(LIBLOVE_LIBRARIES
+ 	love_3p_xxhash
+ )
+ if(LOVE_AROS)
+-	set_target_properties(love_3p_enet love_3p_luasocket love_3p_luahttps PROPERTIES EXCLUDE_FROM_ALL ON)
++	# Sockets through bsdsocket.library, one library base per thread.
++	add_library(love_3p_arossocket STATIC
++		src/libraries/aros/aros_endian.h
++		src/libraries/aros/aros_socket.c
++		src/libraries/aros/aros_socket.h
++	)
++	target_link_libraries(love_3p_arossocket lovedep::SDL)
++	foreach(NETLIB love_3p_enet love_3p_luasocket)
++		# The Roadshow part of bsdsocket.library: getaddrinfo and the like.
++		target_compile_definitions(${NETLIB} PRIVATE __CONFIG_ROADSHOW__)
++		target_link_libraries(${NETLIB} love_3p_arossocket)
++	endforeach()
++	# No Unix domain sockets and no serial devices as descriptors.
++	set_source_files_properties(
++		src/libraries/luasocket/libluasocket/serial.c
++		src/libraries/luasocket/libluasocket/unix.c
++		src/libraries/luasocket/libluasocket/unixdgram.c
++		src/libraries/luasocket/libluasocket/unixstream.c
++		PROPERTIES HEADER_FILE_ONLY ON)
++	set_target_properties(love_3p_luahttps PROPERTIES EXCLUDE_FROM_ALL ON)
++	list(APPEND LIBLOVE_LIBRARIES love_3p_enet love_3p_luasocket love_3p_arossocket)
+ else()
+ 	list(APPEND LIBLOVE_LIBRARIES love_3p_enet love_3p_luasocket love_3p_luahttps)
+ endif()
+diff --git a/src/common/config.h b/src/common/config.h
+index 1ea8e29c7a2464ba666ef5fbbe8e4fb03bdffbea..70b72517eab87196f5fbc43263ce7f782cb9752b 100644
+--- a/src/common/config.h
++++ b/src/common/config.h
+@@ -48,7 +48,7 @@
+ #endif
+ #if defined(__AROS__)
+ #	define LOVE_AROS 1
+-// Not built for AROS yet: the network libraries.
++// Not built for AROS yet: lua-https.
+ #endif
+ #if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+ // I know it's not linux, but it seems most "linux-only" code is bsd-compatible
+@@ -169,9 +169,9 @@
+ #	define LOVE_ENABLE_VIDEO
+ #	define LOVE_ENABLE_WINDOW
+ 
++#	define LOVE_ENABLE_ENET
++#	define LOVE_ENABLE_LUASOCKET
+ #	ifndef LOVE_AROS
+-#		define LOVE_ENABLE_ENET
+-#		define LOVE_ENABLE_LUASOCKET
+ #		define LOVE_ENABLE_LUAHTTPS
+ #	endif
+ #	define LOVE_ENABLE_LUA53
+diff --git a/src/libraries/aros/aros_endian.h b/src/libraries/aros/aros_endian.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a1360ee60828b8e6b6f3f367301ccbc58f2ccf5
+--- /dev/null
++++ b/src/libraries/aros/aros_endian.h
+@@ -0,0 +1,19 @@
++/**
++ * BYTE_ORDER for AROS's <netinet/tcp.h> and <netinet/ip.h>, which test it
++ * without including a header that defines it. Include before them.
++ **/
++
++#ifndef LOVE_AROS_ENDIAN_H
++#define LOVE_AROS_ENDIAN_H
++
++#ifdef __AROS__
++#include <sys/cdefs.h>
++#include <endian.h>
++#ifndef BYTE_ORDER
++#define LITTLE_ENDIAN _LITTLE_ENDIAN
++#define BIG_ENDIAN _BIG_ENDIAN
++#define BYTE_ORDER _BYTE_ORDER
++#endif
++#endif
++
++#endif /* LOVE_AROS_ENDIAN_H */
+diff --git a/src/libraries/aros/aros_socket.c b/src/libraries/aros/aros_socket.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..892400c6370a8da4e6ff0f76e67d30cbfcd7ed98
+--- /dev/null
++++ b/src/libraries/aros/aros_socket.c
+@@ -0,0 +1,102 @@
++/**
++ * Sockets on AROS: one bsdsocket.library base per thread. See aros_socket.h.
++ **/
++
++#ifdef __AROS__
++
++#include <exec/types.h>
++#include <exec/libraries.h>
++#include <utility/tagitem.h>
++#include <proto/exec.h>
++
++#include <stdlib.h>
++
++#include <SDL3/SDL.h>
++
++struct love_aros_net
++{
++	struct Library *base;
++	int err;
++	LONG herr;
++};
++
++/* The library calls below go through this file's own variable. */
++#define SocketBase (net->base)
++#include <proto/bsdsocket.h>
++#include <bsdsocket/socketbasetags.h>
++
++static SDL_TLSID tls;
++static SDL_AtomicInt exit_hook;
++
++static void net_free(void *value)
++{
++	struct love_aros_net *net = (struct love_aros_net *) value;
++
++	if (net->base)
++		CloseLibrary(net->base);
++	SDL_free(net);
++}
++
++/* The main thread's base, if SDL has not released it by the time the
++   program ends. */
++static void net_at_exit(void)
++{
++	struct love_aros_net *net = (struct love_aros_net *) SDL_GetTLS(&tls);
++
++	if (net && net->base)
++	{
++		CloseLibrary(net->base);
++		net->base = NULL;
++	}
++}
++
++static struct love_aros_net *net_state(void)
++{
++	static struct love_aros_net none;
++	struct love_aros_net *net = (struct love_aros_net *) SDL_GetTLS(&tls);
++
++	if (net)
++		return net;
++
++	net = (struct love_aros_net *) SDL_calloc(1, sizeof(*net));
++	if (!net)
++		return &none;
++
++	net->base = OpenLibrary((CONST_STRPTR) "bsdsocket.library", 4);
++	if (net->base)
++	{
++		SocketBaseTags(
++			SBTM_SETVAL(SBTC_ERRNOPTR(sizeof(net->err))), (IPTR) &net->err,
++			SBTM_SETVAL(SBTC_HERRNOLONGPTR), (IPTR) &net->herr,
++			TAG_DONE);
++	}
++
++	if (!SDL_SetTLS(&tls, net, net_free))
++	{
++		net_free(net);
++		return &none;
++	}
++
++	if (SDL_CompareAndSwapAtomicInt(&exit_hook, 0, 1))
++		atexit(net_at_exit);
++
++	return net;
++}
++
++struct Library *love_aros_socket_base(void)
++{
++	return net_state()->base;
++}
++
++int *love_aros_socket_errno(void)
++{
++	return &net_state()->err;
++}
++
++int *love_aros_socket_herrno(void)
++{
++	/* LONG and int are both 32 bits wide on AROS. */
++	return (int *) &net_state()->herr;
++}
++
++#endif /* __AROS__ */
+diff --git a/src/libraries/aros/aros_socket.h b/src/libraries/aros/aros_socket.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7db6d6791f397c08d71ee9f6fb0202f78b84d07
+--- /dev/null
++++ b/src/libraries/aros/aros_socket.h
+@@ -0,0 +1,83 @@
++/**
++ * Sockets on AROS for the bundled network libraries (LuaSocket, ENet).
++ *
++ * AROS has no socket calls in its C library. They are functions of
++ * bsdsocket.library, called through a library base that belongs to the task
++ * which opened it; a socket is usable only through the base it was made
++ * with. This header gives the BSD names (socket, connect, recv, ...) as calls
++ * through the calling thread's own base, and errno/h_errno as that base's
++ * error variables.
++ *
++ * Include it after the system's socket headers. A thread's sockets cannot be
++ * used by another thread.
++ **/
++
++#ifndef LOVE_AROS_SOCKET_H
++#define LOVE_AROS_SOCKET_H
++
++#ifdef __AROS__
++
++/* getaddrinfo, getnameinfo, inet_pton and inet_ntop of bsdsocket.library are
++   declared only with this set, and <netdb.h> reads the declarations: it has
++   to be set for the whole file (the build does that). */
++#ifndef __CONFIG_ROADSHOW__
++#error "build this file with -D__CONFIG_ROADSHOW__"
++#endif
++
++#include "aros_endian.h"
++
++#include <sys/types.h>
++#include <sys/time.h>
++#include <sys/socket.h>
++#include <sys/ioctl.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <arpa/inet.h>
++#include <netdb.h>
++#include <errno.h>
++
++#include <exec/types.h>
++#include <exec/libraries.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The calling thread's bsdsocket.library base, opened on first use and
++   closed when the thread ends. NULL when there is no network stack. */
++struct Library *love_aros_socket_base(void);
++
++/* The error variables bsdsocket.library fills for the calling thread. */
++int *love_aros_socket_errno(void);
++int *love_aros_socket_herrno(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#define SocketBase love_aros_socket_base()
++#include <proto/bsdsocket.h>
++
++/* <arpa/inet.h> renames these to C library functions that AROS does not
++   have; they are bsdsocket.library calls like the rest. */
++#undef inet_addr
++#define inet_addr(cp) __inet_addr_WB(SocketBase, (cp))
++#undef inet_aton
++#define inet_aton(cp, addr) __inet_aton_WB(SocketBase, (CONST_STRPTR) (cp), (addr))
++#undef inet_ntoa
++#define inet_ntoa(in) ((char *) __Inet_NtoA_WB(SocketBase, (in).s_addr))
++#undef inet_pton
++#define inet_pton(af, src, dst) __inet_pton_WB(SocketBase, (af), (src), (dst))
++#undef inet_ntop
++#define inet_ntop(af, src, dst, size) ((const char *) __inet_ntop_WB(SocketBase, (af), (void *) (src), (dst), (size)))
++#undef gai_strerror
++#define gai_strerror(code) ((const char *) __gai_strerror_WB(SocketBase, (code)))
++
++#undef errno
++#define errno (*love_aros_socket_errno())
++#undef h_errno
++#define h_errno (*love_aros_socket_herrno())
++
++#endif /* __AROS__ */
++
++#endif /* LOVE_AROS_SOCKET_H */
+diff --git a/src/libraries/enet/libenet/unix.c b/src/libraries/enet/libenet/unix.c
+index 8cbeae5b38e418376a915ce56c31e7aa6ced4bc4..11f099312aa6086783115e3de971027d714330e9 100644
+--- a/src/libraries/enet/libenet/unix.c
++++ b/src/libraries/enet/libenet/unix.c
+@@ -4,6 +4,10 @@
+ */
+ #ifndef _WIN32
+ 
++#ifdef __AROS__
++#include "../../aros/aros_endian.h"
++#endif
++
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <sys/ioctl.h>
+@@ -46,6 +50,25 @@
+ #endif
+ #endif
+ 
++#ifdef __AROS__
++/* What bsdsocket.library has. No poll() and no fcntl() for sockets. */
++#ifndef HAS_INET_PTON
++#define HAS_INET_PTON 1
++#endif
++#ifndef HAS_INET_NTOP
++#define HAS_INET_NTOP 1
++#endif
++#ifndef HAS_SOCKLEN_T
++#define HAS_SOCKLEN_T 1
++#endif
++#ifndef HAS_GETADDRINFO
++#define HAS_GETADDRINFO 1
++#endif
++#ifndef HAS_GETNAMEINFO
++#define HAS_GETNAMEINFO 1
++#endif
++#endif
++
+ #ifdef HAS_FCNTL
+ #include <fcntl.h>
+ #endif
+@@ -55,6 +78,28 @@
+ #endif
+ 
+ #include "common/config.h"
++
++#ifdef __AROS__
++/* A socket is not a C library descriptor on AROS: it is closed, set up and
++   waited for through bsdsocket.library. */
++#include "../../aros/aros_socket.h"
++
++static int
++enet_aros_ioctl (int socket, unsigned long request, int * value)
++{
++    long argument = * value;
++
++    return IoctlSocket (socket, request, (char *) & argument);
++}
++
++#undef close
++#define close(socket) CloseSocket (socket)
++#undef select
++#define select(count, readSet, writeSet, exceptSet, timeout) WaitSelect (count, readSet, writeSet, exceptSet, timeout, NULL)
++#undef ioctl
++#define ioctl(socket, request, value) enet_aros_ioctl (socket, request, value)
++#endif
++
+ #ifndef HAS_SOCKLEN_T
+ typedef int socklen_t;
+ #endif
+@@ -68,6 +113,12 @@ static enet_uint32 timeBase = 0;
+ int
+ enet_initialize (void)
+ {
++#ifdef __AROS__
++    /* No network stack running. */
++    if (love_aros_socket_base () == NULL)
++      return -1;
++#endif
++
+     return 0;
+ }
+ 
+diff --git a/src/libraries/luasocket/libluasocket/usocket.c b/src/libraries/luasocket/libluasocket/usocket.c
+index 7965db6c443716b8d55ba27d25e1c66c213b7154..1893adaff6122f48649061c79a1cbb3fcde0cda4 100644
+--- a/src/libraries/luasocket/libluasocket/usocket.c
++++ b/src/libraries/luasocket/libluasocket/usocket.c
+@@ -14,6 +14,18 @@
+ #include <string.h>
+ #include <signal.h>
+ 
++#ifdef __AROS__
++/* A socket is not a C library descriptor on AROS: it is closed, read,
++   written and waited for through bsdsocket.library. */
++#undef close
++#define close(s) CloseSocket(s)
++#undef select
++#define select(n, r, w, e, t) WaitSelect(n, r, w, e, t, NULL)
++#define read(s, b, n) recv(s, b, n, 0)
++#define write(s, b, n) send(s, b, n, 0)
++#define hstrerror(e) "host lookup failed"
++#endif
++
+ /*-------------------------------------------------------------------------*\
+ * Wait for readable/writable/connected socket with timeout
+ \*-------------------------------------------------------------------------*/
+@@ -78,8 +90,13 @@ int socket_waitfd(p_socket ps, int sw, p_timeout tm) {
+ * Initializes module
+ \*-------------------------------------------------------------------------*/
+ int socket_open(void) {
++#ifdef __AROS__
++    /* No network stack running: the module cannot be used. */
++    if (!love_aros_socket_base()) return 0;
++#else
+     /* installs a handler to ignore sigpipe or it will crash us */
+     signal(SIGPIPE, SIG_IGN);
++#endif
+     return 1;
+ }
+ 
+@@ -362,18 +379,28 @@ int socket_read(p_socket ps, char *data, size_t count, size_t *got, p_timeout tm
+ * Put socket into blocking mode
+ \*-------------------------------------------------------------------------*/
+ void socket_setblocking(p_socket ps) {
++#ifdef __AROS__
++    long nonblocking = 0;
++    IoctlSocket(*ps, FIONBIO, (char *) &nonblocking);
++#else
+     int flags = fcntl(*ps, F_GETFL, 0);
+     flags &= (~(O_NONBLOCK));
+     fcntl(*ps, F_SETFL, flags);
++#endif
+ }
+ 
+ /*-------------------------------------------------------------------------*\
+ * Put socket into non-blocking mode
+ \*-------------------------------------------------------------------------*/
+ void socket_setnonblocking(p_socket ps) {
++#ifdef __AROS__
++    long nonblocking = 1;
++    IoctlSocket(*ps, FIONBIO, (char *) &nonblocking);
++#else
+     int flags = fcntl(*ps, F_GETFL, 0);
+     flags |= O_NONBLOCK;
+     fcntl(*ps, F_SETFL, flags);
++#endif
+ }
+ 
+ /*-------------------------------------------------------------------------*\
+diff --git a/src/libraries/luasocket/libluasocket/usocket.h b/src/libraries/luasocket/libluasocket/usocket.h
+index 45f2f99f7fb43f208fba9dd4c62aae65248f1c5e..597941002aa9fcceed8d1159ec345ec41d145851 100644
+--- a/src/libraries/luasocket/libluasocket/usocket.h
++++ b/src/libraries/luasocket/libluasocket/usocket.h
+@@ -8,6 +8,9 @@
+ /*=========================================================================*\
+ * BSD include files
+ \*=========================================================================*/
++#ifdef __AROS__
++#include "../../aros/aros_endian.h"
++#endif
+ /* error codes */
+ #include <errno.h>
+ /* close function */
+@@ -31,6 +34,14 @@
+ #include <netinet/tcp.h>
+ #include <net/if.h>
+ 
++#ifdef __AROS__
++/* Socket calls through bsdsocket.library; no poll(). */
++#include "../../aros/aros_socket.h"
++#ifndef SOCKET_SELECT
++#define SOCKET_SELECT
++#endif
++#endif
++
+ #ifndef SO_REUSEPORT
+ #define SO_REUSEPORT SO_REUSEADDR
+ #endif
+diff --git a/src/libraries/luasocket/luasocket.cpp b/src/libraries/luasocket/luasocket.cpp
+index aa1b9bbb7c7e2acdafa1c7373c09e9a094462079..60ce021ae527e48b7d4e818a7a1629f85e6d8a4a 100644
+--- a/src/libraries/luasocket/luasocket.cpp
++++ b/src/libraries/luasocket/luasocket.cpp
+@@ -85,7 +85,10 @@ int preload(lua_State * L)
+ 
+ 	// Preload code from LuaSocket.
+ 	preload(L, "socket.core", luaopen_socket_core);
++#ifndef __AROS__
++	// AROS has no Unix domain sockets.
+ 	preload(L, "socket.unix", luaopen_socket_unix);
++#endif
+ 	preload(L, "mime.core",   luaopen_mime_core);
+ 
+ 	preload(L, "socket",         "=[socket \"socket.lua\"]",  socket_lua,  sizeof(socket_lua));

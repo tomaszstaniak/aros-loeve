@@ -1,0 +1,13 @@
+0001-glslang-token-names.patch
+0002-aros-filesystem.patch
+0003-aros-platform.patch
+0004-openal-audio.patch
+0005-text-input-on-by-default.patch
+0006-fit-window-to-screen.patch
+0007-tracker-music.patch
+0008-network-luasocket-enet.patch
+0009-physfs-lock-across-threads.patch
+0010-lua-https-mbedtls.patch
+0011-fresh-window-buffers-black.patch
+0012-workbench-start.patch
+0013-saves-beside-the-program.patch

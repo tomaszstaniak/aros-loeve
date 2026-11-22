@@ -1,0 +1,44 @@
+Title: No position-independent code on AROS
+Repository: openal-soft 1.24.3 release archive
+Date: 2026-11-20
+Author: aros-loeve project
+Problem: The helper libraries alsoft.common and alsoft.fmt are always compiled as position-independent code. Their objects then carry GOT relocations, which the AROS loader does not accept ("file is not executable").
+Change: The property is not set on either when CMAKE_SYSTEM_NAME is AROS.
+Scope: AROS (all targets)
+Upstream: local-only (upstream has no AROS support)
+Verification: scripts/deps.py checks the built libopenal.a for GOT relocations: none.
+Removal: never, unless AROS learns to load such code
+---
+diff -ru a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-11-20 12:00:46
++++ b/CMakeLists.txt	2026-11-20 12:00:46
+@@ -1403,8 +1403,10 @@
+ target_compile_definitions(alsoft.common PRIVATE ${CPP_DEFS})
+ target_compile_options(alsoft.common PRIVATE ${C_FLAGS})
+ target_link_libraries(alsoft.common PRIVATE alsoft::fmt)
+-set_target_properties(alsoft.common PROPERTIES ${ALSOFT_STD_VERSION_PROPS}
+-    POSITION_INDEPENDENT_CODE TRUE)
++set_target_properties(alsoft.common PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "AROS") # AROS cannot load position-independent code.
++    set_target_properties(alsoft.common PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
++endif()
+ 
+ 
+ unset(HAS_ROUTER)
+diff -ru a/fmt-11.1.1/CMakeLists.txt b/fmt-11.1.1/CMakeLists.txt
+--- a/fmt-11.1.1/CMakeLists.txt	2026-11-20 12:01:39
++++ b/fmt-11.1.1/CMakeLists.txt	2026-11-20 12:01:52
+@@ -73,10 +73,12 @@
+ set_target_properties(alsoft.fmt PROPERTIES ${ALSOFT_STD_VERSION_PROPS}
+   VERSION ${FMT_VERSION} SOVERSION ${CPACK_PACKAGE_VERSION_MAJOR}
+   DEBUG_POSTFIX "${ALSOFT_FMT_DEBUG_POSTFIX}"
+-  POSITION_INDEPENDENT_CODE TRUE
+   C_VISIBILITY_PRESET hidden
+   CXX_VISIBILITY_PRESET hidden
+   EXCLUDE_FROM_ALL TRUE)
++if (NOT CMAKE_SYSTEM_NAME STREQUAL "AROS") # AROS cannot load position-independent code.
++  set_target_properties(alsoft.fmt PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
++endif ()
+ 
+ if (MSVC)
+   # Unicode support requires compiling with /utf-8.

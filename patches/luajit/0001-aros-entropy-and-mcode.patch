@@ -1,0 +1,148 @@
+Title: AROS: entropy seed and memory for machine code
+Repository: luajit
+Base: 96f7b297326e9fd454b7186c6858b2773f94a0dc
+Requires: nothing
+Date: 2026-11-20
+Author: aros-loeve project
+Problem: LuaJIT builds for an unknown system (TARGET_SYS=Other) stop at "Missing secure PRNG seed for this OS" and "Missing OS support for explicit placement of executable memory": AROS has no /dev/urandom and no mmap.
+Change: The PRNG seed comes from entropy.resource directly (not getentropy(): see lj_aros.c). Machine code memory comes from exec.library in the new lj_aros.c: AllocMem(MEMF_EXECUTABLE), without LuaJIT's address hints (AllocAbs() with those addresses stopped mainline in tlsf_allocabs); protection changes are no-ops. The exec calls live in their own file because the AROS headers and LuaJIT both define a type named Node.
+Scope: AROS x86_64 (mainline tested); no effect elsewhere
+Upstream: local-only
+Verification: Built for mainline AROS x86_64 (GCC 10.5, SDK nightly 20261110) with no implicit function declarations; in LÖVE 12.0 on pool v1-3 (exec 51.17), 2026-11-20: jit.status() true, a trace compiled on the main thread (a 5e7-iteration loop 0.94 s against 4.29 s with jit.off()), ffi structs, arrays and pointers, clean exit
+Removal: None planned.
+---
+diff -ruN a/src/Makefile b/src/Makefile
+--- a/src/Makefile	2026-11-19 21:21:11
++++ b/src/Makefile	2026-11-20 02:02:07
+@@ -522,7 +522,7 @@
+ 	  lj_lex.o lj_parse.o lj_bcread.o lj_bcwrite.o lj_load.o \
+ 	  lj_ir.o lj_opt_mem.o lj_opt_fold.o lj_opt_narrow.o \
+ 	  lj_opt_dce.o lj_opt_loop.o lj_opt_split.o lj_opt_sink.o \
+-	  lj_mcode.o lj_snap.o lj_record.o lj_crecord.o lj_ffrecord.o \
++	  lj_mcode.o lj_aros.o lj_snap.o lj_record.o lj_crecord.o lj_ffrecord.o \
+ 	  lj_asm.o lj_trace.o lj_gdbjit.o \
+ 	  lj_ctype.o lj_cdata.o lj_cconv.o lj_ccall.o lj_ccallback.o \
+ 	  lj_carith.o lj_clib.o lj_cparse.o \
+diff -ruN a/src/lj_aros.c b/src/lj_aros.c
+--- a/src/lj_aros.c	1970-01-01 01:00:00
++++ b/src/lj_aros.c	2026-11-20 02:02:07
+@@ -0,0 +1,53 @@
++/*
++** AROS support: system entropy and executable memory for machine code.
++** Copyright (C) 2005-2026 Mike Pall. See Copyright Notice in luajit.h
++**
++** Kept apart from the rest of the VM: the AROS system headers and LuaJIT
++** both have a type named Node.
++*/
++
++#ifdef __AROS__
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <exec/memory.h>
++#include <resources/entropy.h>
++#include <proto/exec.h>
++#include <proto/entropy.h>
++
++int lj_aros_entropy(void *buf, size_t len);
++void *lj_aros_mcode_alloc(uintptr_t hint, size_t sz);
++void lj_aros_mcode_free(void *p, size_t sz);
++
++/* Random bytes straight from entropy.resource. Returns 1 on success.
++** Not through getentropy(): that goes through the C library's per-task
++** state, which a thread started by SDL (a plain process, not a pthread) does
++** not have, and every Lua state seeds its PRNG in the thread that creates it.
++*/
++int lj_aros_entropy(void *buf, size_t len)
++{
++  struct Library *EntropyBase = (struct Library *)OpenResource(ENTROPYNAME);
++  if (!EntropyBase)
++    return 0;
++  return GetEntropy(buf, (ULONG)len) == (LONG)len;
++}
++
++/* Memory for machine code. AROS has no mmap, and exec.library cannot be
++** asked for "a block near this address" (AllocAbs() takes one exact address
++** and stopped the system on mainline when given LuaJIT's probe addresses),
++** so the hint is not used. LuaJIT checks whether the block is in range of
++** its code and, if not, starts a new range around the block it got.
++*/
++void *lj_aros_mcode_alloc(uintptr_t hint, size_t sz)
++{
++  (void)hint;
++  return AllocMem(sz, MEMF_EXECUTABLE);
++}
++
++void lj_aros_mcode_free(void *p, size_t sz)
++{
++  FreeMem(p, sz);
++}
++
++#endif
+diff -ruN a/src/lj_mcode.c b/src/lj_mcode.c
+--- a/src/lj_mcode.c	2026-11-19 21:21:11
++++ b/src/lj_mcode.c	2026-11-20 02:02:07
+@@ -105,6 +105,33 @@
+ #endif
+ }
+ 
++#elif defined(__AROS__)
++
++/* No memory protection to switch: the values only tell the cases apart. */
++#define MCPROT_RW	1
++#define MCPROT_RX	2
++#define MCPROT_RWX	3
++
++/* In lj_aros.c. */
++extern void *lj_aros_mcode_alloc(uintptr_t hint, size_t sz);
++extern void lj_aros_mcode_free(void *p, size_t sz);
++
++static void *mcode_alloc_at(uintptr_t hint, size_t sz, int prot)
++{
++  UNUSED(prot);
++  return lj_aros_mcode_alloc(hint, sz);
++}
++
++static void mcode_free(void *p, size_t sz)
++{
++  lj_aros_mcode_free(p, sz);
++}
++
++static void mcode_setprot(jit_State *J, void *p, size_t sz, int prot)
++{
++  UNUSED(J); UNUSED(p); UNUSED(sz); UNUSED(prot);
++}
++
+ #elif LJ_TARGET_POSIX
+ 
+ #include <sys/mman.h>
+diff -ruN a/src/lj_prng.c b/src/lj_prng.c
+--- a/src/lj_prng.c	2026-11-19 21:21:11
++++ b/src/lj_prng.c	2026-11-20 02:02:07
+@@ -75,6 +75,11 @@
+ 
+ /* Nothing to define. */
+ 
++#elif defined(__AROS__)
++
++/* In lj_aros.c. */
++extern int lj_aros_entropy(void *buf, size_t len);
++
+ #elif LJ_TARGET_XBOX360
+ 
+ extern int XNetRandom(void *buf, unsigned int len);
+@@ -165,7 +170,12 @@
+ /* Securely seed PRNG from system entropy. Returns 0 on failure. */
+ int LJ_FASTCALL lj_prng_seed_secure(PRNGState *rs)
+ {
+-#if LJ_TARGET_XBOX360
++#if defined(__AROS__)
++
++  if (lj_aros_entropy(rs->u, sizeof(rs->u)))
++    goto ok;
++
++#elif LJ_TARGET_XBOX360
+ 
+   if (XNetRandom(rs->u, (unsigned int)sizeof(rs->u)) == 0)
+     goto ok;

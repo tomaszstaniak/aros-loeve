@@ -1,0 +1,90 @@
+Title: Saved games in the Saves drawer beside the program
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-22
+Author: aros-loeve project
+Problem: Save directories were ENVARC:LOVE/<game>. The system copies all of ENVARC: into memory at every boot (Startup-Sequence: Copy ENVARC: ENV: ALL), so every saved game cost memory from then on, and large saves do not belong there.
+Change: The save directory is <program drawer>/Saves/<game> (also for a program with a joined game). A save directory that an earlier build left in ENVARC: stays in use, so nobody loses a profile. ENVARC: remains the fallback when the Saves drawer cannot be made (read-only medium).
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64, nightly 2026-11-18, softpipe (pool v1-3), 2026-11-22, a game that counts its runs in a save file: new game, save directory RAM Disk:PkgT/love/Saves/t8 and the count kept between runs; a game with saves of package revision 2 in ENVARC:LOVE/t7 goes on counting there after the upgrade to revision 3; apkg 0.7.8 verify lists the save as not the package's and remove keeps it. Not run: a read-only program drawer, Raspberry Pi.
+Removal: not planned
+---
+diff --git a/src/modules/filesystem/physfs/Filesystem.cpp b/src/modules/filesystem/physfs/Filesystem.cpp
+index 5ae6467335ffae0ac1be9f492fab2fd2f1ebc937..155d35d72ea6b6dffcd7e767fd675976d6575b9d 100644
+--- a/src/modules/filesystem/physfs/Filesystem.cpp
++++ b/src/modules/filesystem/physfs/Filesystem.cpp
+@@ -32,6 +32,10 @@
+ // PhysFS
+ #include "libraries/physfs/physfs.h"
+ 
++#ifdef LOVE_AROS
++#	include <proto/dos.h>
++#endif
++
+ // For great CWD. (Current Working Directory)
+ // Using this instead of boost::filesystem which totally
+ // cramped our style.
+@@ -612,6 +616,23 @@ std::string Filesystem::getFullCommonPath(CommonPath path)
+ 			suffix = std::string(LOVE_PATH_SEPARATOR LOVE_APPDATA_FOLDER LOVE_PATH_SEPARATOR) + saveIdentity;
+ 
+ #ifdef LOVE_AROS
++		if (path == COMMONPATH_APP_SAVEDIR)
++		{
++			// Saves that an earlier build left in ENVARC: stay in use.
++			std::string old = std::string("ENVARC:") + (isFused() ? "" : LOVE_APPDATA_FOLDER "/") + saveIdentity;
++			BPTR oldlock = Lock((STRPTR) old.c_str(), SHARED_LOCK);
++			if (oldlock != BNULL)
++			{
++				UnLock(oldlock);
++				fullPaths[path] = canonicalizeRealPath(old.c_str());
++				return fullPaths[path];
++			}
++
++			// The Saves drawer already belongs to LOVE: no LOVE drawer inside.
++			if (rootpath != "ENVARC:")
++				suffix = std::string(LOVE_PATH_SEPARATOR) + saveIdentity;
++		}
++
+ 		// "Volume:" takes a name directly: "Volume:/name" would be its parent.
+ 		if (rootpath.back() == ':')
+ 			suffix = suffix.substr(1);
+@@ -744,9 +765,11 @@ std::string Filesystem::getFullCommonPath(CommonPath path)
+ 
+ #elif defined(LOVE_AROS)
+ 
+-	// AROS has no per-user folders. Programs keep their own files in ENVARC:,
+-	// so save directories are ENVARC:LOVE/<game>; the system volume stands in
+-	// for the home, desktop and documents folders.
++	// AROS has no per-user folders. Saved games go to the Saves drawer beside
++	// the program (<program drawer>/Saves/<game>): ENVARC: is copied into
++	// memory at every boot, which is no place for them. ENVARC: remains the
++	// fallback when the program's drawer cannot be written. The system volume
++	// stands in for the home, desktop and documents folders.
+ 	switch (path)
+ 	{
+ 	case COMMONPATH_APP_SAVEDIR:
+@@ -754,7 +777,21 @@ std::string Filesystem::getFullCommonPath(CommonPath path)
+ 		// Handled above.
+ 		break;
+ 	case COMMONPATH_USER_APPDATA:
+-		fullPaths[path] = "ENVARC:";
++		{
++			char buffer[2048] = {0};
++			bool ok = NameFromLock(GetProgramDir(), (STRPTR) buffer, sizeof(buffer)) != 0
++				&& AddPart((STRPTR) buffer, (STRPTR) "Saves", sizeof(buffer)) != 0;
++			if (ok)
++			{
++				BPTR lock = Lock((STRPTR) buffer, SHARED_LOCK);
++				if (lock == BNULL)
++					lock = CreateDir((STRPTR) buffer);
++				ok = lock != BNULL;
++				if (ok)
++					UnLock(lock);
++			}
++			fullPaths[path] = ok ? std::string(buffer) : std::string("ENVARC:");
++		}
+ 		break;
+ 	case COMMONPATH_USER_HOME:
+ 	case COMMONPATH_USER_DESKTOP:

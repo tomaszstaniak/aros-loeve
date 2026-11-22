@@ -1,0 +1,33 @@
+Title: glslang: token names that collide with exec/types.h on AROS
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-19
+Author: aros-loeve project
+Problem: glslang's generated parser has tokens named VOID, BOOL, FLOAT and DOUBLE. On AROS the C++ library headers reach exec/types.h through pthread.h, where BOOL, FLOAT and DOUBLE are types and VOID is a macro, so glslang_tab.cpp and Scan.cpp do not compile.
+Change: glslang_tab.cpp.h renames those four tokens with macros on AROS, before the token enum. Everything after the header (the parser and the scanner) sees the renamed tokens.
+Scope: AROS (all targets); no effect elsewhere
+Upstream: local-only (glslang_tab.cpp.h is generated; an upstream fix belongs in glslang's grammar or its includes)
+Verification: Built for mainline AROS x86_64 (GCC 10.5, SDK nightly 20261110) with no implicit function declarations; LÖVE 12.0 ran a test game on pool v1-3 (exec 51.17, softpipe) on 2026-11-19: window, canvas, shader, shapes and a clean exit, seven screen pixels exact
+Removal: When glslang's parser no longer shares names with exec/types.h, or the C++ headers stop including it.
+---
+diff --git a/src/libraries/glslang/glslang/MachineIndependent/glslang_tab.cpp.h b/src/libraries/glslang/glslang/MachineIndependent/glslang_tab.cpp.h
+index 11932ead0d82071c3907cd285b52376023c003bb..b7476d0f7b30207a4c3ccc35a7ecad1791b2fae7 100644
+--- a/src/libraries/glslang/glslang/MachineIndependent/glslang_tab.cpp.h
++++ b/src/libraries/glslang/glslang/MachineIndependent/glslang_tab.cpp.h
+@@ -48,6 +48,15 @@ extern int yydebug;
+ /* Token kinds.  */
+ #ifndef YYTOKENTYPE
+ # define YYTOKENTYPE
++# ifdef __AROS__
++/* exec/types.h, which the C++ library headers reach through pthread.h, has
++   types and a macro with these names. */
++#  undef VOID
++#  define VOID GLSLANG_TOKEN_VOID
++#  define BOOL GLSLANG_TOKEN_BOOL
++#  define FLOAT GLSLANG_TOKEN_FLOAT
++#  define DOUBLE GLSLANG_TOKEN_DOUBLE
++# endif
+   enum yytokentype
+   {
+     YYEMPTY = -2,

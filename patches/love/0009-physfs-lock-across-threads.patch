@@ -1,0 +1,97 @@
+Title: PhysicsFS lock and thread identity for LOVE threads
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-21
+Author: aros-loeve project
+Problem: LOVE threads are Exec processes started by SDL, not pthreads, and AROS's pthread_self() answers 0 for every task it did not create, the main task included. PhysicsFS's POSIX lock treats a caller with the owner's id as the owner, so two LOVE threads entered PhysicsFS at once, and all threads shared one error state. Balatro 1.0.1o (sound, save and main threads reading files together) failed with "Could not open file resources/shaders/dissolve.fs. Does not exist." from a .love archive, and from a directory its save thread crashed in closeHandleInOpenList.
+Change: On AROS the PhysicsFS mutex is an Exec signal semaphore (owned per task, nests) and the thread id is the task address; both live in physfs_platform_aros.c, and the pthread versions in physfs_platform_posix.c are left out for AROS.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64 (nightly 2026-11-15, VirtIO-GPU with VirGL, pool slot v1-4), 2026-11-21, Balatro 1.0.1o started from the unchanged game archive: before, the shader error above (archive) and a Software Failure requester in the save thread (directory); after, the main menu is drawn and stays for two minutes with no requester. Not run: Raspberry Pi, a full game round.
+Removal: not planned
+---
+diff --git a/src/libraries/physfs/physfs_platform_aros.c b/src/libraries/physfs/physfs_platform_aros.c
+index 4ed063af7acfc273f13ca7e245ef0f7a9a488e0f..03a65aa124588cff1d89a661fe2c06687c0bd7c4 100644
+--- a/src/libraries/physfs/physfs_platform_aros.c
++++ b/src/libraries/physfs/physfs_platform_aros.c
+@@ -15,6 +15,8 @@
+ 
+ #include <string.h>
+ 
++#include <exec/semaphores.h>
++#include <proto/exec.h>
+ #include <proto/dos.h>
+ 
+ #include "physfs_internal.h"
+@@ -31,6 +33,46 @@ void __PHYSFS_platformDeinit(void)
+ } /* __PHYSFS_platformDeinit */
+ 
+ 
++/* LOVE's threads are Exec processes started by SDL, not pthreads, and
++   pthread_self() answers 0 for every one of them. The POSIX mutex of
++   physfs_platform_posix.c compares owners by that value, so it would let two
++   threads in at once. A signal semaphore knows its owner task and nests. */
++void *__PHYSFS_platformGetThreadID(void)
++{
++    return (void *) FindTask(NULL);
++} /* __PHYSFS_platformGetThreadID */
++
++
++void *__PHYSFS_platformCreateMutex(void)
++{
++    struct SignalSemaphore *sem = (struct SignalSemaphore *)
++                               allocator.Malloc(sizeof (struct SignalSemaphore));
++    BAIL_IF(!sem, PHYSFS_ERR_OUT_OF_MEMORY, NULL);
++    memset(sem, '\0', sizeof (*sem));
++    InitSemaphore(sem);
++    return sem;
++} /* __PHYSFS_platformCreateMutex */
++
++
++void __PHYSFS_platformDestroyMutex(void *mutex)
++{
++    allocator.Free(mutex);
++} /* __PHYSFS_platformDestroyMutex */
++
++
++int __PHYSFS_platformGrabMutex(void *mutex)
++{
++    ObtainSemaphore((struct SignalSemaphore *) mutex);
++    return 1;
++} /* __PHYSFS_platformGrabMutex */
++
++
++void __PHYSFS_platformReleaseMutex(void *mutex)
++{
++    ReleaseSemaphore((struct SignalSemaphore *) mutex);
++} /* __PHYSFS_platformReleaseMutex */
++
++
+ void __PHYSFS_platformDetectAvailableCDs(PHYSFS_StringCallback cb, void *data)
+ {
+     /* no-op: volumes are not listed. */
+diff --git a/src/libraries/physfs/physfs_platform_posix.c b/src/libraries/physfs/physfs_platform_posix.c
+index c17928c377c1c0652686c7abb15eebc2c917dd61..b54e2ff6a132b82e567a340b9aa2ed7fab925ca2 100644
+--- a/src/libraries/physfs/physfs_platform_posix.c
++++ b/src/libraries/physfs/physfs_platform_posix.c
+@@ -369,6 +369,10 @@ int __PHYSFS_platformStat(const char *fname, PHYSFS_Stat *st, const int follow)
+ } /* __PHYSFS_platformStat */
+ 
+ 
++/* AROS: threads are Exec tasks that pthread_self() cannot tell apart;
++   physfs_platform_aros.c has the thread id and the mutex. */
++#ifndef PHYSFS_PLATFORM_AROS
++
+ typedef struct
+ {
+     pthread_mutex_t mutex;
+@@ -445,6 +449,8 @@ void __PHYSFS_platformReleaseMutex(void *mutex)
+     } /* if */
+ } /* __PHYSFS_platformReleaseMutex */
+ 
++#endif  /* !PHYSFS_PLATFORM_AROS */
++
+ #endif  /* PHYSFS_PLATFORM_POSIX */
+ 
+ /* end of physfs_platform_posix.c ... */

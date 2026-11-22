@@ -1,0 +1,78 @@
+LÖVE @VERSION@ for AROS
+====================
+
+LÖVE is a framework for making 2D games in Lua: https://love2d.org
+This is a build of LÖVE @VERSION@ (upstream development branch, commit
+@COMMIT@) for @SYSTEM@.
+
+Needs
+-----
+
+  - @SYSTEM@, nightly build of 2026-11-15 or later
+  - OpenGL (Mesa, part of the system)
+  - AHI for sound, a TCP/IP stack for network games
+
+Starting a game
+---------------
+
+From Workbench:
+
+  - Double-click the love icon and choose the game in the file requester:
+    a .love file, or the drawer that holds main.lua (go into the drawer and
+    leave the file name empty). A game for Windows that is a single .exe
+    made with LÖVE can be chosen as well.
+  - Or drop the game's icon on LÖVE's window while it shows no game.
+  - To give a game its own icon, type in a Shell:
+
+        love --icon <game.love or drawer with main.lua>
+
+    A double click on the new icon starts the game. For a .love file the
+    icon is the file's own; for a game in a drawer it is the icon of
+    main.lua inside that drawer. The icon keeps the place of this drawer;
+    delete it and make it again after moving this drawer.
+
+From a Shell, with the path of this drawer in front of love:
+
+    Run love <drawer with main.lua>
+    Run love <game.love>
+
+Start it with Run: a program that uses OpenGL directly from a Shell disturbs
+the commands typed into that Shell afterwards.
+
+Saved games and settings of a game are kept in the Saves drawer beside the
+program, one drawer per game. Saves that an earlier revision left in
+ENVARC:LOVE/<game> stay there and stay in use; to move them, copy that
+drawer into Saves and delete it from ENVARC:LOVE.
+
+What works
+----------
+
+Window and fullscreen, drawing (images, shapes, text, canvases, shaders),
+keyboard and mouse, sound (WAV, Ogg Vorbis, MP3, FLAC, tracker modules),
+game files and .love archives, threads, physics. Games run on LuaJIT.
+
+Network: LuaSocket, ENet and HTTPS requests (require "https"). HTTPS checks
+the server's certificate against the system's certificate bundle.
+
+A game that asks for a window larger than the screen gets one that fits.
+
+Known issues
+------------
+
+  - Joysticks and video playback are not tested.
+  - Without hardware OpenGL the system draws in software and games are slow.
+  - ffi.load and ffi.C cannot find functions (AROS has no dlopen).
+
+Please report problems: @REPOSITORY@/issues
+
+Licences
+--------
+
+LÖVE: zlib licence. The texts of LÖVE's licence and of the libraries built
+into this program are in the licenses drawer.
+
+OpenAL Soft and GNU libiconv are under the LGPL and are linked statically.
+The files needed to link this program again with a changed version of them
+are in @KIT@, published beside this archive.
+
+Source of this build (patches and build scripts): @REPOSITORY@

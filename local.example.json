@@ -1,0 +1,21 @@
+{
+  "aros-x86_64-abiv1-pc": {
+    "cc": "<mainline toolchain>/x86_64-aros-gcc",
+    "cxx": "<mainline toolchain>/x86_64-aros-g++",
+    "ar": "<mainline toolchain>/x86_64-aros-ar",
+    "sdk": "<mainline Developer SDK>",
+    "sdl_kit": "<aros-sdl>/build/aros-x86_64-abiv1-pc/kit",
+    "crypto_kit": "<aros-crypto>/build/aros-x86_64-abiv1-pc/kit",
+    "gcc_build": "<build tree of the toolchain's GCC, optional: see docs/development.md>",
+    "apkg_pack": "<apkg-pack.pyz, for scripts/package.py>"
+  },
+  "aros-aarch64-abiv1-raspi": {
+    "cc": "<Raspberry Pi toolchain>/aarch64-aros-gcc",
+    "cxx": "<Raspberry Pi toolchain>/aarch64-aros-g++",
+    "ar": "<Raspberry Pi toolchain>/aarch64-aros-ar",
+    "sdk": "<Raspberry Pi Developer SDK>",
+    "sdl_kit": "<aros-sdl>/build/aros-aarch64-abiv1-raspi/kit",
+    "crypto_kit": "<aros-crypto>/build/aros-aarch64-abiv1-raspi/kit",
+    "cxxrt": "<libc++ built for AROS: include/c++/v1 and lib; the Pi toolchain has no C++ library>"
+  }
+}

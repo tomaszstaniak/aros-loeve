@@ -1,0 +1,30 @@
+Title: Text input on by default
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-20
+Author: aros-loeve project
+Problem: SDL3 sends no text events until SDL_StartTextInput is called, and this LOVE revision calls it only from love.keyboard.setTextInput. A game that relies on love.textinput without asking for it (the documented default on desktop systems) received key presses but no text.
+Change: On AROS the window starts text input when it is set up. love.keyboard.setTextInput(false) still turns it off.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64 (nightly 2026-11-15), 2026-11-20: a test game that never calls setTextInput reports hasTextInput true and receives love.textinput for "a", "B" and "1"; before the change the same game received only keypressed.
+Removal: when upstream starts text input by default on desktop systems, or has an AROS build
+---
+diff --git a/src/modules/window/sdl/Window.cpp b/src/modules/window/sdl/Window.cpp
+index f3b09669c03a61fe47011921c5f0f61fb8a6b960..49899d3638ac51cf2cdaaaf0cb4cb32978fb4752 100644
+--- a/src/modules/window/sdl/Window.cpp
++++ b/src/modules/window/sdl/Window.cpp
+@@ -640,6 +640,12 @@ bool Window::setWindow(int width, int height, WindowSettings *settings)
+ 
+ 	SDL_RaiseWindow(window);
+ 
++#ifdef LOVE_AROS
++	// SDL3 sends no text events until text input is started. Games written
++	// for desktop systems expect love.textinput without asking for it.
++	SDL_StartTextInput(window);
++#endif
++
+ 	setVSync(f.vsync);
+ 
+ 	updateSettings(f, false);

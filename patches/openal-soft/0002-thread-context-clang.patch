@@ -1,0 +1,62 @@
+Title: Thread context without a thread-local object with Clang on AROS
+Repository: openal-soft 1.24.3 release archive
+Date: 2026-11-21
+Author: aros-loeve project
+Problem: ALCcontext::sThreadContext is a thread_local object with a destructor, defined in one file and used from another. Such a use calls the object's initialisation function through a weak reference, which Clang for AArch64 compiles as a load from the GOT; AROS cannot load such code (scripts/deps.py found 4 GOT relocations in libopenal.a).
+Change: With Clang on AROS the object is left out and setThreadContext() stores the pointer directly. A context that is still current on a thread when the thread ends is then not released by that thread; LOVE makes its context current for the whole process (alcMakeContextCurrent) and never per thread.
+Scope: AROS with Clang (Raspberry Pi); applied through series.aros-aarch64-abiv1-raspi only
+Upstream: local-only (upstream has no AROS support)
+Verification: scripts/deps.py aros-aarch64-abiv1-raspi: libopenal.a has no GOT relocations.
+Removal: never, unless AROS learns to load such code
+---
+diff --color=never -ru a/alc/context.cpp b/alc/context.cpp
+--- a/alc/context.cpp	2026-11-21 03:47:17
++++ b/alc/context.cpp	2026-11-21 03:47:17
+@@ -105,6 +105,7 @@
+ std::atomic<bool> ALCcontext::sGlobalContextLock{false};
+ std::atomic<ALCcontext*> ALCcontext::sGlobalContext{nullptr};
+ 
++#if !(defined(__AROS__) && defined(__clang__))
+ ALCcontext::ThreadCtx::~ThreadCtx()
+ {
+     if(ALCcontext *ctx{std::exchange(ALCcontext::sLocalContext, nullptr)})
+@@ -115,6 +116,7 @@
+     }
+ }
+ thread_local ALCcontext::ThreadCtx ALCcontext::sThreadContext;
++#endif
+ 
+ ALeffect ALCcontext::sDefaultEffect;
+ 
+@@ -259,7 +261,7 @@
+     {
+         WARN("{} released while current on thread", voidp{this});
+         auto _ = ContextRef{sLocalContext};
+-        sThreadContext.set(nullptr);
++        setThreadContext(nullptr);
+     }
+ 
+     if(ALCcontext *origctx{this}; sGlobalContext.compare_exchange_strong(origctx, nullptr))
+diff --color=never -ru a/alc/context.h b/alc/context.h
+--- a/alc/context.h	2026-11-21 03:47:17
++++ b/alc/context.h	2026-11-21 03:47:17
+@@ -215,11 +215,19 @@
+         void set(ALCcontext *ctx) const noexcept { sLocalContext = ctx; }
+         /* NOLINTEND(readability-convert-member-functions-to-static) */
+     };
++#if !(defined(__AROS__) && defined(__clang__))
+     static thread_local ThreadCtx sThreadContext;
++#endif
+ 
+ public:
+     static ALCcontext *getThreadContext() noexcept { return sLocalContext; }
++#if defined(__AROS__) && defined(__clang__)
++    /* No object with a destructor behind the thread's context: nothing
++     * releases a context left current on a thread that ends. */
++    static void setThreadContext(ALCcontext *context) noexcept { sLocalContext = context; }
++#else
+     static void setThreadContext(ALCcontext *context) noexcept { sThreadContext.set(context); }
++#endif
+ 
+     /* Default effect that applies to sources that don't have an effect on send 0. */
+     static ALeffect sDefaultEffect;

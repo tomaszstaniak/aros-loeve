@@ -1,0 +1,379 @@
+Title: AROS platform: build, stack, timer, system name, modules without a backend yet
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-19
+Author: aros-loeve project
+Problem: LÖVE's build knows Windows, macOS, Linux, Android and iOS. On AROS it stopped at "Could not detect target platform", built position-independent code (which AROS cannot load), linked liblove as a shared library, required OpenAL and libmodplug, and had no timer or program path. At run time the Shell's 40 KiB stack overflowed in the shader compiler and SDL's missing sensor support stopped start-up.
+Change: LOVE_AROS in config.h; CMake: no PIC, liblove static, no Vulkan backend. Timer from SDL's performance counter, the program path from GetProgramDir, love.system.getOS() is "AROS". src/aros_stack.c runs the program on an 8 MiB stack. love.sensor loads without SDL sensor support and reports no sensors. Not built yet on AROS: OpenAL output (love.audio uses the null backend), libmodplug, enet, luasocket, lua-https.
+Scope: AROS (built and run for mainline x86_64); no effect elsewhere
+Upstream: candidate once audio and the network libraries work
+Verification: Built for mainline AROS x86_64 (GCC 10.5, SDK nightly 20261110) with no implicit function declarations; LÖVE 12.0 ran a test game on pool v1-3 (exec 51.17, softpipe) on 2026-11-19: window, canvas, shader, shapes and a clean exit, seven screen pixels exact
+Removal: The "not built yet" parts go as audio and network support arrive.
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 239b39938213effeaec08fcc24c261c2af741e57..f3de39880132424f775e408931698f813e8a7d76 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -28,7 +28,9 @@ cmake_minimum_required(VERSION 3.19)
+ project(love)
+ 
+ set(CMAKE_MODULE_PATH "${love_SOURCE_DIR}/extra/cmake" ${CMAKE_MODULE_PATH})
+-set(CMAKE_POSITION_INDEPENDENT_CODE TRUE) # Needed for shared libs on Linux. (-fPIC).
++if(NOT "${CMAKE_SYSTEM_NAME}" STREQUAL "AROS") # AROS cannot load position-independent code.
++	set(CMAKE_POSITION_INDEPENDENT_CODE TRUE) # Needed for shared libs on Linux. (-fPIC).
++endif()
+ set(CMAKE_CXX_STANDARD 17)
+ set_property(GLOBAL PROPERTY USE_FOLDERS ON)	# Allow grouping projects in Visual Studio
+ 
+@@ -88,6 +90,11 @@ else()
+ 	set(LOVE_DEFAULT_JIT TRUE)
+ endif()
+ 
++if("${CMAKE_SYSTEM_NAME}" STREQUAL "AROS")
++	set(LOVE_AROS ON)
++	set(LOVE_DEFAULT_JIT OFF)
++endif()
++
+ option(LOVE_JIT "Use LuaJIT" ${LOVE_DEFAULT_JIT})
+ 
+ if(LOVE_JIT)
+@@ -187,6 +194,7 @@ Please see https://github.com/love2d/megasource
+ 	target_include_directories(lovedep::Harfbuzz INTERFACE ${HARFBUZZ_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::Harfbuzz INTERFACE ${HARFBUZZ_LIBRARY})
+ 
++	if(NOT LOVE_AROS)
+ 	find_package(OpenAL REQUIRED)
+ 	target_include_directories(lovedep::OpenAL INTERFACE ${OPENAL_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::OpenAL INTERFACE ${OPENAL_LIBRARY})
+@@ -194,6 +202,7 @@ Please see https://github.com/love2d/megasource
+ 	find_package(ModPlug REQUIRED)
+ 	target_include_directories(lovedep::Modplug INTERFACE ${MODPLUG_INCLUDE_DIR})
+ 	target_link_libraries(lovedep::Modplug INTERFACE ${MODPLUG_LIBRARY})
++	endif()
+ 
+ 	find_package(Theora REQUIRED)
+ 	target_include_directories(lovedep::Theora INTERFACE ${THEORA_INCLUDE_DIR})
+@@ -378,8 +387,12 @@ add_library(love_audio INTERFACE)
+ target_link_libraries(love_audio INTERFACE
+ 	love_audio_root
+ 	love_audio_null
+-	love_audio_openal
+ )
++if(LOVE_AROS)
++	set_target_properties(love_audio_openal PROPERTIES EXCLUDE_FROM_ALL ON)
++else()
++	target_link_libraries(love_audio INTERFACE love_audio_openal)
++endif()
+ 
+ #
+ # love.data
+@@ -680,7 +693,7 @@ if(APPLE)
+ 	target_link_libraries(love_graphics INTERFACE
+ 		love_graphics_metal
+ 	)
+-else()
++elseif(NOT LOVE_AROS)
+ 	add_library(love_graphics_vulkan STATIC
+ 		src/modules/graphics/vulkan/Graphics.h
+ 		src/modules/graphics/vulkan/Graphics.cpp
+@@ -1163,6 +1176,10 @@ add_library(love_timer STATIC
+ target_link_libraries(love_timer PUBLIC
+ 	lovedep::Lua
+ )
++if(LOVE_AROS)
++	# The AROS timer reads SDL's performance counter.
++	target_link_libraries(love_timer PUBLIC lovedep::SDL)
++endif()
+ 
+ #
+ # love.touch
+@@ -1717,6 +1734,7 @@ add_library(love_3p_physfs
+ 	src/libraries/physfs/physfs_platform_posix.c
+ 	src/libraries/physfs/physfs_platform_qnx.c
+ 	src/libraries/physfs/physfs_platform_unix.c
++	src/libraries/physfs/physfs_platform_aros.c
+ 	src/libraries/physfs/physfs_platform_windows.c
+ 	src/libraries/physfs/physfs_platform_winrt.cpp
+ 	src/libraries/physfs/physfs_platforms.h
+@@ -1906,7 +1924,13 @@ if(MINGW)
+ 	set(CMAKE_RC_FLAGS ${CMAKE_RC_FLAGS} "-c 65001 --preprocessor-arg=-finput-charset=UTF-16LE")
+ endif()
+ 
+-add_library(liblove SHARED
++if(LOVE_AROS)
++	# AROS programs are linked statically.
++	set(LOVE_LIBLOVE_TYPE STATIC)
++else()
++	set(LOVE_LIBLOVE_TYPE SHARED)
++endif()
++add_library(liblove ${LOVE_LIBLOVE_TYPE}
+ 	src/modules/love/love.cpp
+ 	src/modules/love/love.h
+ 	# These are here so they show up in Visual Studio:
+@@ -1947,13 +1971,10 @@ set(LIBLOVE_DEPENDENCIES
+ set(LIBLOVE_LIBRARIES
+ 	love_3p_box2d
+ 	love_3p_ddsparse
+-	love_3p_enet
+ 	love_3p_glad
+ 	love_3p_glslang
+ 	love_3p_lodepng
+-	love_3p_luasocket
+ 	love_3p_lua53
+-	love_3p_luahttps
+ 	love_3p_lz4
+ 	love_3p_noise1234
+ 	love_3p_physfs
+@@ -1961,6 +1982,11 @@ set(LIBLOVE_LIBRARIES
+ 	love_3p_wuff
+ 	love_3p_xxhash
+ )
++if(LOVE_AROS)
++	set_target_properties(love_3p_enet love_3p_luasocket love_3p_luahttps PROPERTIES EXCLUDE_FROM_ALL ON)
++else()
++	list(APPEND LIBLOVE_LIBRARIES love_3p_enet love_3p_luasocket love_3p_luahttps)
++endif()
+ target_link_libraries(liblove ${LIBLOVE_DEPENDENCIES} ${LIBLOVE_LIBRARIES})
+ 
+ if(LOVE_EXTRA_DEPENDECIES)
+@@ -2008,6 +2034,10 @@ else()
+ endif()
+ 
+ target_sources(love PRIVATE src/love.cpp)
++if(LOVE_AROS)
++	# A stack of __stack bytes also where the start-up code does not provide it.
++	target_sources(love PRIVATE src/aros_stack.c)
++endif()
+ target_link_libraries(love liblove)
+ set_target_properties(love PROPERTIES
+ 	C_VISIBILITY_PRESET hidden
+diff --git a/src/aros_stack.c b/src/aros_stack.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e40ba9aa4cc80a82b4411b7db2542489d6c7afa8
+--- /dev/null
++++ b/src/aros_stack.c
+@@ -0,0 +1,64 @@
++/**
++ * Copyright (c) 2006-2024 LOVE Development Team
++ *
++ * This software is provided 'as-is', without any express or implied
++ * warranty.  In no event will the authors be held liable for any damages
++ * arising from the use of this software.
++ *
++ * Permission is granted to anyone to use this software for any purpose,
++ * including commercial applications, and to alter it and redistribute it
++ * freely, subject to the following restrictions:
++ *
++ * 1. The origin of this software must not be misrepresented; you must not
++ *    claim that you wrote the original software. If you use this software
++ *    in a product, an acknowledgment in the product documentation would be
++ *    appreciated but is not required.
++ * 2. Altered source versions must be plainly marked as such, and must not be
++ *    misrepresented as being the original software.
++ * 3. This notice may not be removed or altered from any source distribution.
++ **/
++
++/*
++ * AROS: run the program on a stack of at least __stack bytes.
++ *
++ * A Shell start runs the program on the Shell's stack, a Workbench start on
++ * the icon's; both are far too small for Lua, the shader compiler and the
++ * image decoders. Not every AROS start-up code swaps to __stack itself. This
++ * entry sits in the start-up chain after detaching and before the C library
++ * set-up and main(), so exit() from anywhere comes back here and the stack is
++ * freed. Where the stack is already large enough it only continues the chain.
++ */
++
++#include <aros/startup.h>
++#include <aros/symbolsets.h>
++#include <exec/memory.h>
++#include <exec/tasks.h>
++#include <proto/exec.h>
++
++/* Start-up code that swaps stacks itself reads this too. */
++unsigned long __stack = 8 * 1024 * 1024;
++
++static void love_stack(struct ExecBase *SysBase)
++{
++	struct Task *me = FindTask(NULL);
++	IPTR want = ((IPTR) __stack + 15) & ~(IPTR) 15;
++	IPTR have = (IPTR) me->tc_SPUpper - (IPTR) me->tc_SPLower;
++	struct StackSwapStruct sss;
++	struct StackSwapArgs args = { { 0 } };
++	UBYTE *stack;
++
++	if (want <= have || !(stack = AllocMem(want, MEMF_ANY)))
++	{
++		__startup_entries_next();
++		return;
++	}
++
++	sss.stk_Lower = stack;
++	sss.stk_Upper = stack + want;
++	sss.stk_Pointer = sss.stk_Upper;
++	args.Args[0] = (IPTR) SysBase;
++	NewStackSwap(&sss, (APTR) ___startup_entries_next, &args);
++	FreeMem(stack, want);
++}
++
++ADD2SET(love_stack, PROGRAM_ENTRIES, -60);
+diff --git a/src/common/config.h b/src/common/config.h
+index e52e2209f3eb8f4275ba174fde30f0213cc47f2e..ad62aca04d60e0e278734ba7aa2f43093368c6cf 100644
+--- a/src/common/config.h
++++ b/src/common/config.h
+@@ -46,6 +46,12 @@
+ #		define LOVE_MACOS 1
+ #	endif
+ #endif
++#if defined(__AROS__)
++#	define LOVE_AROS 1
++// Not built for AROS yet: OpenAL audio output, libmodplug, the network libraries.
++#	define LOVE_NO_OPENAL 1
++#	define LOVE_NO_MODPLUG 1
++#endif
+ #if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+ // I know it's not linux, but it seems most "linux-only" code is bsd-compatible
+ #	define LOVE_LINUX 1
+@@ -165,14 +171,16 @@
+ #	define LOVE_ENABLE_VIDEO
+ #	define LOVE_ENABLE_WINDOW
+ 
+-#	define LOVE_ENABLE_ENET
+-#	define LOVE_ENABLE_LUASOCKET
++#	ifndef LOVE_AROS
++#		define LOVE_ENABLE_ENET
++#		define LOVE_ENABLE_LUASOCKET
++#		define LOVE_ENABLE_LUAHTTPS
++#	endif
+ #	define LOVE_ENABLE_LUA53
+-#	define LOVE_ENABLE_LUAHTTPS
+ #endif
+ 
+ // Check we have a sane configuration
+-#if !defined(LOVE_WINDOWS) && !defined(LOVE_LINUX) && !defined(LOVE_IOS) && !defined(LOVE_MACOS) && !defined(LOVE_ANDROID)
++#if !defined(LOVE_WINDOWS) && !defined(LOVE_LINUX) && !defined(LOVE_IOS) && !defined(LOVE_MACOS) && !defined(LOVE_ANDROID) && !defined(LOVE_AROS)
+ #	error Could not detect target platform
+ #endif
+ #if !defined(LOVE_LITTLE_ENDIAN) && !defined(LOVE_BIG_ENDIAN)
+diff --git a/src/modules/audio/wrap_Audio.cpp b/src/modules/audio/wrap_Audio.cpp
+index ab6d17d11b1f5160b8e63f96ae539b4324eb71c7..02bc3fcf363e35b0b67007413bd61fa08197450e 100644
+--- a/src/modules/audio/wrap_Audio.cpp
++++ b/src/modules/audio/wrap_Audio.cpp
+@@ -22,7 +22,9 @@
+ #include "wrap_Audio.h"
+ #include "filesystem/wrap_Filesystem.h"
+ 
++#ifndef LOVE_NO_OPENAL
+ #include "openal/Audio.h"
++#endif
+ #include "null/Audio.h"
+ 
+ #include "common/runtime.h"
+@@ -681,6 +683,7 @@ extern "C" int luaopen_love_audio(lua_State *L)
+ 
+ 	if (instance == nullptr)
+ 	{
++#ifndef LOVE_NO_OPENAL
+ 		// Try OpenAL first.
+ 		try
+ 		{
+@@ -690,6 +693,7 @@ extern "C" int luaopen_love_audio(lua_State *L)
+ 		{
+ 			std::cout << e.what() << std::endl;
+ 		}
++#endif
+ 	}
+ 	else
+ 		instance->retain();
+diff --git a/src/modules/sensor/sdl/Sensor.cpp b/src/modules/sensor/sdl/Sensor.cpp
+index 7d4bac12d4452b16b86981017ffc9f4ab9b347e2..e94912a350cc84c223e94dfc80aea06721714f9a 100644
+--- a/src/modules/sensor/sdl/Sensor.cpp
++++ b/src/modules/sensor/sdl/Sensor.cpp
+@@ -36,12 +36,22 @@ Sensor::Sensor()
+ 	: love::sensor::Sensor("love.sensor.sdl")
+ 	, sensors()
+ {
++#ifdef LOVE_AROS
++	// SDL for AROS has no sensor support. The module still loads, as games
++	// expect it to: it reports that no sensor is available.
++	sensorsInitialized = SDL_InitSubSystem(SDL_INIT_SENSOR);
++#else
+ 	if (!SDL_InitSubSystem(SDL_INIT_SENSOR))
+ 		throw love::Exception("Could not initialize SDL sensor subsystem (%s)", SDL_GetError());
++#endif
+ }
+ 
+ Sensor::~Sensor()
+ {
++#ifdef LOVE_AROS
++	if (!sensorsInitialized)
++		return;
++#endif
+ 	SDL_QuitSubSystem(SDL_INIT_SENSOR);
+ }
+ 
+diff --git a/src/modules/sensor/sdl/Sensor.h b/src/modules/sensor/sdl/Sensor.h
+index 3f7b06aaa2a874ecb5c1419e2c6ec0642937cc98..a12a70b0851d1689dde6bfd1e21ff166c554da32 100644
+--- a/src/modules/sensor/sdl/Sensor.h
++++ b/src/modules/sensor/sdl/Sensor.h
+@@ -22,6 +22,7 @@
+ #define LOVE_SENSOR_SDL_SENSOR_H
+ 
+ // LOVE
++#include "common/config.h"
+ #include "sensor/Sensor.h"
+ 
+ // SDL
+@@ -55,6 +56,9 @@ class Sensor : public love::sensor::Sensor
+ 
+ private:
+ 	std::map<SensorType, SDL_Sensor*> sensors;
++#ifdef LOVE_AROS
++	bool sensorsInitialized = false;
++#endif
+ 
+ }; // Sensor
+ 
+diff --git a/src/modules/system/System.cpp b/src/modules/system/System.cpp
+index 35809e820072d2e6435c725982b82803c34059b7..011fc1e4ced550e17157124cfa7566eeb8bd2015 100644
+--- a/src/modules/system/System.cpp
++++ b/src/modules/system/System.cpp
+@@ -52,6 +52,8 @@ const char *System::getOS()
+ 	return "Android";
+ #elif defined(LOVE_LINUX)
+ 	return "Linux";
++#elif defined(LOVE_AROS)
++	return "AROS";
+ #else
+ 	return "Unknown";
+ #endif
+diff --git a/src/modules/timer/Timer.cpp b/src/modules/timer/Timer.cpp
+index d81dcb88892aef4bb5804d8828acde875967bfda..01f0913f4153633946f6ad9971de01c2d2e86d15 100644
+--- a/src/modules/timer/Timer.cpp
++++ b/src/modules/timer/Timer.cpp
+@@ -35,6 +35,8 @@
+ #include <unistd.h>
+ #include <time.h>
+ #include <sys/time.h>
++#elif defined(LOVE_AROS)
++#include <SDL3/SDL_timer.h>
+ #endif
+ 
+ namespace love
+@@ -143,6 +145,15 @@ double Timer::getTime()
+ 	return (double) sec + (double) nsec / 1.0e9;
+ }
+ 
++#elif defined(LOVE_AROS)
++
++double Timer::getTime()
++{
++	static const Uint64 start = SDL_GetPerformanceCounter();
++	static const double frequency = (double) SDL_GetPerformanceFrequency();
++	return (double) (SDL_GetPerformanceCounter() - start) / frequency;
++}
++
+ #elif defined(LOVE_MACOS) || defined(LOVE_IOS)
+ 
+ static mach_timebase_info_data_t getTimebaseInfo()

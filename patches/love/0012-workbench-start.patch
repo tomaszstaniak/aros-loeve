@@ -1,0 +1,384 @@
+Title: Game from a Workbench icon, a file requester, love --icon
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-22
+Author: aros-loeve project
+Problem: A game could only be started from a Shell. A Workbench start passes a message instead of arguments, which LOVE ignored, so a project icon with LOVE as its default tool showed the no-game screen, and a double click on the program's icon had no way to pick a game. Output of a game started from Workbench opened a console window over the game.
+Change: src/aros_start.c: the project of a Workbench start becomes the first argument; a Workbench start without a project asks for the game with an ASL file requester (a .love file, or a drawer with an empty file name; the last drawer is remembered in the variable LOVE.gamedrawer), unless a game is joined to the program file; `love --icon <game>` writes a project icon whose default tool is this program, beside a .love file or on main.lua inside a game drawer (Workbench opens a drawer whatever its icon says), copied from PROGDIR:Game.info; __stdiowin is NIL: so a Workbench start has no console window.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64, nightly 2026-11-18, softpipe (pool v1-3), 2026-11-22: `love --icon` on a .love file and on a drawer (second call refused, icon left as it is); WBRun of the .love icon and a mouse double click on the main.lua icon start the game with the game as arg[1]; WBRun of the program opens the requester, a typed drawer starts that game, Cancel gives the no-game screen, the next requester opens in the last drawer; a game icon dropped on the no-game window starts the game. Not run: Raspberry Pi, a program file with a joined game started from Workbench.
+Removal: not planned
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5a8f7f0433761cbc4f7b96d661d0d6a4d1ebd971..3e24045d5b9f1a7ec34f88bdb75e1dba6aa72a89 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2073,6 +2073,7 @@ target_sources(love PRIVATE src/love.cpp)
+ if(LOVE_AROS)
+ 	# A stack of __stack bytes also where the start-up code does not provide it.
+ 	target_sources(love PRIVATE src/aros_stack.c)
++	target_sources(love PRIVATE src/aros_start.c)
+ endif()
+ target_link_libraries(love liblove)
+ set_target_properties(love PROPERTIES
+diff --git a/src/aros_start.c b/src/aros_start.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a04890a72275bef8a0faa5a647bec81c72f5a23
+--- /dev/null
++++ b/src/aros_start.c
+@@ -0,0 +1,322 @@
++/**
++ * Copyright (c) 2006-2024 LOVE Development Team
++ *
++ * This software is provided 'as-is', without any express or implied
++ * warranty.  In no event will the authors be held liable for any damages
++ * arising from the use of this software.
++ *
++ * Permission is granted to anyone to use this software for any purpose,
++ * including commercial applications, and to alter it and redistribute it
++ * freely, subject to the following restrictions:
++ *
++ * 1. The origin of this software must not be misrepresented; you must not
++ *    claim that you wrote the original software. If you use this software
++ *    in a product, an acknowledgment in the product documentation would be
++ *    appreciated but is not required.
++ * 2. Altered source versions must be plainly marked as such, and must not be
++ *    misrepresented as being the original software.
++ * 3. This notice may not be removed or altered from any source distribution.
++ **/
++
++/*
++ * AROS: where the game comes from.
++ *
++ *  - A Workbench start hands over a message instead of arguments. A game
++ *    icon (a project icon whose default tool is this program) names the game
++ *    there; it becomes the first argument.
++ *  - A Workbench start without a game asks for one with a file requester,
++ *    unless a game is joined to the program file.
++ *  - "love --icon <game>" from a Shell writes such a game icon: beside a
++ *    .love file, on main.lua inside a game drawer.
++ */
++
++#include <dos/dos.h>
++#include <dos/var.h>
++#include <exec/libraries.h>
++#include <libraries/asl.h>
++#include <workbench/startup.h>
++#include <workbench/workbench.h>
++#include <proto/asl.h>
++#include <proto/dos.h>
++#include <proto/exec.h>
++#include <proto/icon.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define PATH_MAX_LEN 2048
++#define DRAWER_VARIABLE "LOVE.gamedrawer"
++
++int love_aros_start(int argc, char **argv, int *new_argc, char ***new_argv, int *exitcode);
++
++static char *full_name(BPTR lock, CONST_STRPTR name)
++{
++	char *buffer = malloc(PATH_MAX_LEN);
++
++	if (!buffer)
++		return NULL;
++	if (!NameFromLock(lock, (STRPTR) buffer, PATH_MAX_LEN)
++		|| (name && name[0] && !AddPart((STRPTR) buffer, name, PATH_MAX_LEN)))
++	{
++		free(buffer);
++		return NULL;
++	}
++	return buffer;
++}
++
++static char *program_name(void)
++{
++	char name[256];
++
++	if (!GetProgramName((STRPTR) name, sizeof(name)))
++		return NULL;
++	return full_name(GetProgramDir(), FilePart((STRPTR) name));
++}
++
++/* A game joined to the program file is a zip archive at its end. */
++static int has_joined_game(CONST_STRPTR program)
++{
++	static UBYTE tail[65536 + 22];
++	BPTR file = Open(program, MODE_OLDFILE);
++	LONG size, start, got, i;
++	int found = 0;
++
++	if (file == BNULL)
++		return 0;
++
++	Seek(file, 0, OFFSET_END);
++	size = Seek(file, 0, OFFSET_BEGINNING);
++	start = size > (LONG) sizeof(tail) ? size - (LONG) sizeof(tail) : 0;
++	Seek(file, start, OFFSET_BEGINNING);
++	got = Read(file, tail, sizeof(tail));
++	Close(file);
++
++	for (i = got - 22; i >= 0 && !found; i--)
++		found = tail[i] == 'P' && tail[i + 1] == 'K' && tail[i + 2] == 5 && tail[i + 3] == 6;
++
++	return found;
++}
++
++static char *ask_for_game(void)
++{
++	struct Library *AslBase = OpenLibrary((CONST_STRPTR) "asl.library", 39);
++	struct FileRequester *request;
++	char drawer[PATH_MAX_LEN] = "";
++	char *game = NULL;
++
++	if (!AslBase)
++		return NULL;
++
++	if (GetVar((CONST_STRPTR) DRAWER_VARIABLE, (STRPTR) drawer, sizeof(drawer), GVF_GLOBAL_ONLY) < 0)
++		drawer[0] = 0;
++
++	request = AllocAslRequestTags(ASL_FileRequest,
++		ASLFR_TitleText, (IPTR) "LOVE: choose a game",
++		ASLFR_PositiveText, (IPTR) "Start",
++		ASLFR_InitialDrawer, (IPTR) drawer,
++		ASLFR_RejectIcons, TRUE,
++		TAG_DONE);
++
++	if (request)
++	{
++		if (AslRequest(request, NULL))
++		{
++			game = malloc(PATH_MAX_LEN);
++			if (game)
++			{
++				strlcpy(game, (const char *) request->fr_Drawer, PATH_MAX_LEN);
++				if (request->fr_File && request->fr_File[0]
++					&& !AddPart((STRPTR) game, request->fr_File, PATH_MAX_LEN))
++				{
++					free(game);
++					game = NULL;
++				}
++			}
++			if (game && !game[0])
++			{
++				/* Nothing chosen at all. */
++				free(game);
++				game = NULL;
++			}
++			if (game)
++				SetVar((CONST_STRPTR) DRAWER_VARIABLE, request->fr_Drawer, -1,
++					GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
++		}
++		FreeAslRequest(request);
++	}
++
++	CloseLibrary(AslBase);
++	return game;
++}
++
++static int make_icon(const char *game)
++{
++	struct Library *IconBase;
++	struct DiskObject *icon;
++	char *program = program_name();
++	char *name = NULL;
++	char info[PATH_MAX_LEN];
++	BPTR lock;
++	size_t length;
++	int result = RETURN_FAIL;
++
++	lock = Lock((CONST_STRPTR) game, SHARED_LOCK);
++	if (lock != BNULL)
++	{
++		name = full_name(lock, NULL);
++		UnLock(lock);
++	}
++	if (!program || !name)
++	{
++		printf("love: cannot find %s\n", game);
++		goto out;
++	}
++
++	length = strlen(name);
++	if (length == 0 || name[length - 1] == ':')
++	{
++		printf("love: %s is a whole volume; give a .love file or a game drawer\n", name);
++		goto out;
++	}
++
++	/*
++	 * Workbench opens a drawer whatever its icon says, so a game in a drawer
++	 * gets its icon on main.lua inside: LOVE takes the drawer of a .lua file
++	 * as the game.
++	 */
++	{
++		struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
++		int drawer = 0;
++
++		lock = Lock((CONST_STRPTR) name, SHARED_LOCK);
++		if (fib && lock != BNULL && Examine(lock, fib))
++			drawer = fib->fib_DirEntryType > 0;
++		if (lock != BNULL)
++			UnLock(lock);
++		if (fib)
++			FreeDosObject(DOS_FIB, fib);
++
++		if (drawer)
++		{
++			if (!AddPart((STRPTR) name, (CONST_STRPTR) "main.lua", PATH_MAX_LEN))
++				goto out;
++			lock = Lock((CONST_STRPTR) name, SHARED_LOCK);
++			if (lock == BNULL)
++			{
++				printf("love: %s is missing; this drawer is not a game\n", name);
++				goto out;
++			}
++			UnLock(lock);
++		}
++	}
++
++	snprintf(info, sizeof(info), "%s.info", name);
++	lock = Lock((CONST_STRPTR) info, SHARED_LOCK);
++	if (lock != BNULL)
++	{
++		UnLock(lock);
++		printf("love: %s exists already and was left as it is\n", info);
++		goto out;
++	}
++
++	IconBase = OpenLibrary((CONST_STRPTR) "icon.library", 44);
++	if (!IconBase)
++	{
++		printf("love: icon.library does not open\n");
++		goto out;
++	}
++
++	icon = GetDiskObject((CONST_STRPTR) "PROGDIR:Game");
++	if (!icon)
++		icon = GetDefDiskObject(WBPROJECT);
++	if (icon)
++	{
++		STRPTR tool = icon->do_DefaultTool;
++		UBYTE type = icon->do_Type;
++
++		icon->do_Type = WBPROJECT;
++		icon->do_DefaultTool = (STRPTR) program;
++		icon->do_CurrentX = NO_ICON_POSITION;
++		icon->do_CurrentY = NO_ICON_POSITION;
++
++		if (PutDiskObject((CONST_STRPTR) name, icon))
++		{
++			printf("love: wrote %s; a double click on it starts the game\n", info);
++			result = RETURN_OK;
++		}
++		else
++			printf("love: cannot write %s\n", info);
++
++		icon->do_DefaultTool = tool;
++		icon->do_Type = type;
++		FreeDiskObject(icon);
++	}
++	else
++		printf("love: no icon to copy (PROGDIR:Game.info is missing)\n");
++
++	CloseLibrary(IconBase);
++
++out:
++	free(program);
++	free(name);
++	return result;
++}
++
++/*
++ * Gives the arguments LOVE works with. Returns 0 when the program is done
++ * already (exit with *exitcode), 1 to go on.
++ */
++int love_aros_start(int argc, char **argv, int *new_argc, char ***new_argv, int *exitcode)
++{
++	static char *list[4];
++	struct WBStartup *message;
++	int count = 0;
++
++	*new_argc = argc;
++	*new_argv = argv;
++	*exitcode = 0;
++
++	if (argc > 0)
++	{
++		if (argc > 1 && strcmp(argv[1], "--icon") == 0)
++		{
++			if (argc != 3)
++			{
++				printf("usage: love --icon <game.love or drawer with main.lua>\n");
++				*exitcode = RETURN_FAIL;
++			}
++			else
++				*exitcode = make_icon(argv[2]);
++			return 0;
++		}
++		return 1;
++	}
++
++	message = (struct WBStartup *) argv;
++	if (!message || message->sm_NumArgs < 1)
++		return 1;
++
++	list[count] = full_name(message->sm_ArgList[0].wa_Lock, message->sm_ArgList[0].wa_Name);
++	if (!list[count])
++		return 1;
++	count++;
++
++	if (message->sm_NumArgs > 1)
++		list[count] = full_name(message->sm_ArgList[1].wa_Lock, message->sm_ArgList[1].wa_Name);
++	else if (!has_joined_game((CONST_STRPTR) list[0]))
++		list[count] = ask_for_game();
++	if (list[count])
++		count++;
++
++	list[count] = NULL;
++	*new_argc = count;
++	*new_argv = list;
++	return 1;
++}
++
++/*
++ * A Workbench start gets no console window: games print freely, and the
++ * window would open over the game. Start from a Shell to read the output.
++ */
++char const __stdiowin[] = "NIL:";
+diff --git a/src/love.cpp b/src/love.cpp
+index 8db471fe31d2a939a7fe773d68e89c4961d918d3..aaa068fca8fa85cc4f2138a5d553df9c7b62cf46 100644
+--- a/src/love.cpp
++++ b/src/love.cpp
+@@ -302,6 +302,10 @@ static DoneAction runlove(int argc, char **argv, int &retval, love::Variant &res
+ 	return done;
+ }
+ 
++#ifdef LOVE_AROS
++extern "C" int love_aros_start(int argc, char **argv, int *new_argc, char ***new_argv, int *exitcode);
++#endif
++
+ int main(int argc, char **argv)
+ {
+ 	if (strcmp(LOVE_VERSION_STRING, love_version()) != 0)
+@@ -311,6 +315,15 @@ int main(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
++#ifdef LOVE_AROS
++	{
++		// A game from a Workbench icon or the file requester, "love --icon".
++		int exitcode = 0;
++		if (!love_aros_start(argc, argv, &argc, &argv, &exitcode))
++			return exitcode;
++	}
++#endif
++
+ 	int retval = 0;
+ 	DoneAction done = DONE_QUIT;
+ 	love::Variant restartvalue;
