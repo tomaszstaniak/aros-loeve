@@ -61,6 +61,9 @@ Known issues
 
   - Joysticks and video playback are not tested.
   - Without hardware OpenGL the system draws in software and games are slow.
+  - Balatro on a GeForce GTX 980 (nvgfx driver, 4 GB of memory) stalls for
+    ten to twenty seconds from time to time. Reported once, not reproduced
+    yet; please report it if you see it.
   - ffi.load and ffi.C cannot find functions (AROS has no dlopen).
 
 Please report problems: @REPOSITORY@/issues
