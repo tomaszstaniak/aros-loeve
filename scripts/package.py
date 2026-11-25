@@ -37,6 +37,23 @@ import deps  # noqa: E402
 ROOT = deps.ROOT
 TARGETS = {
     "aros-x86_64-abiv1-pc": ("x86_64", "v1", "mainline AROS (ABIv1) on x86_64"),
+    "aros-aarch64-abiv1-raspi": ("aarch64", "v1", "mainline AROS (ABIv1) on Raspberry Pi (AArch64)"),
+}
+# Where scripts/build.py leaves the program, and what the ReadMe says about
+# the Lua it runs games on.
+BUILD = {
+    "aros-x86_64-abiv1-pc": (
+        "love", "Games run on LuaJIT.",
+        "  - ffi.load and ffi.C cannot find functions (AROS has no dlopen), so a\n"
+        "    game that needs another native library does not start.\n"),
+    "aros-aarch64-abiv1-raspi": (
+        "love-lua51", "Games run on Lua 5.1 (no LuaJIT on this system yet).",
+        "  - No LuaJIT: games are slower than on x86_64, and a game that needs\n"
+        "    the ffi or jit modules does not run.\n"
+        "  - Sound is not verified: it could not be tried in the emulator this\n"
+        "    build was tested in. Please report how it works on your Pi.\n"
+        "  - A game that needs a native library other than Steam's does not\n"
+        "    start.\n"),
 }
 # Libraries and devices the program opens (strings of the linked program,
 # checked against what the linked code calls).
@@ -48,6 +65,8 @@ SYSTEM = {
         "openurl.library",
     ],
 }
+# Same list: the programs of both targets name the same libraries.
+SYSTEM["aros-aarch64-abiv1-raspi"] = SYSTEM["aros-x86_64-abiv1-pc"]
 REPOSITORY = "https://github.com/tomaszstaniak/aros-loeve"
 STRIP_FLAGS = ["--strip-unneeded", "--remove-section", ".comment"]
 
@@ -94,7 +113,8 @@ def make_drawer(a, t, bld, stage, release, version, revision):
     kit = f"love-{release}-{a.target}-lgpl-kit.zip"
     text = (ROOT / "packaging/ReadMe.txt.in").read_text()
     for k, v in (("@VERSION@", version), ("@COMMIT@", pin[:12]), ("@SYSTEM@", system),
-                 ("@REPOSITORY@", REPOSITORY), ("@KIT@", kit)):
+                 ("@REPOSITORY@", REPOSITORY), ("@KIT@", kit),
+                 ("@LUA@", BUILD[a.target][1]), ("@TARGET_ISSUES@", BUILD[a.target][2])):
         text = text.replace(k, v)
     # AROS text viewers read ISO-8859-1.
     (drawer / "ReadMe.txt").write_bytes(text.encode("iso-8859-1"))
@@ -169,6 +189,14 @@ def pack(a, t, stage, drawer, release):
     return out
 
 
+def sdk_date(sdk):
+    """Date of the nightly an SDK directory is named after (…-20261124…/Developer)."""
+    m = re.search(r"(20\d\d)(\d\d)(\d\d)", str(sdk))
+    if not m:
+        sys.exit(f"cannot tell the nightly date of the SDK from its path: {sdk}")
+    return "-".join(m.groups())
+
+
 def make_kit(a, t, bld, stage, release):
     """The relink kit: the files named on the link line, and a script that repeats it."""
     want = sha256(bld / "love")
@@ -219,7 +247,8 @@ cxx=$1; sysroot=$2; out=${3:-love}
 "$cxx" %s
 echo "linked $out"
 """ % " ".join(line_out)
-    (kit / "link.sh").write_text(script)
+    gxx = TARGETS[a.target][0] + "-aros-g++"
+    (kit / "link.sh").write_text(script.replace("x86_64-aros-g++", gxx))
     (kit / "README.txt").write_text(f"""LGPL relink kit for love {release} ({a.target})
 
 love is linked statically with OpenAL Soft and GNU libiconv, which are under
@@ -227,10 +256,10 @@ the GNU Lesser General Public License 2.1. This kit holds the object files
 and libraries love was linked from, so that you can link the program again
 with a changed version of those libraries:
 
-    sh link.sh <x86_64-aros-g++> <AROS Developer SDK> love
+    sh link.sh <{gxx}> <AROS Developer SDK> love
 
 Built with {run([cxx, "--version"]).splitlines()[0]} and the Developer SDK
-of the mainline AROS nightly of 2026-11-10. With that compiler and SDK and
+of the mainline AROS nightly of {sdk_date(t["sdk"])}. With that compiler and SDK and
 the files unchanged, the result is the program of the package before it was
 stripped (SHA-256 {want}).
 
@@ -269,7 +298,7 @@ def main():
         raise SystemExit("package: the release name is <version>-aros<number>")
     version, revision = m.group(1), int(m.group(2))
     t = deps.config(a.target)
-    bld = ROOT / "build" / a.target / "love"
+    bld = ROOT / "build" / a.target / BUILD[a.target][0]
     if not (bld / "love").exists():
         raise SystemExit("package: no build; run scripts/build.py")
     stage = ROOT / "build" / a.target / "package"

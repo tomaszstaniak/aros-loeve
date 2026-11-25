@@ -9,12 +9,13 @@ the libraries it needs. LÖVE itself is not copied here.
 | System | State |
 | --- | --- |
 | mainline AROS, x86_64 | released: runs games from a drawer, a `.love` file or a single-file game, from Workbench or a Shell |
-| mainline AROS, Raspberry Pi | builds with Lua 5.1 (no LuaJIT); draws and makes HTTPS requests in the emulator; threads need a nightly newer than the one tried; sound not tried; no package yet |
+| mainline AROS, Raspberry Pi | released: the same on Lua 5.1 (no LuaJIT); tried in the emulator with threads, a real game, saves and Workbench start; sound not verified |
 | ABIv11 distributions, x86_64 | not started |
 
 LÖVE version: 12.0 (upstream `main`). It needs OpenGL 3.3 or OpenGL ES 3.0, which mainline
-AROS provides through Mesa, and an AROS nightly of 2026-11-15 or later (on older ones a
-program with threads can stop the system when a thread ends).
+AROS provides through Mesa. Revision 4 needs an AROS nightly of 2026-11-24 or later (a system
+structure changed that day and programs have to be built for one side of it); revision 3
+serves the nightlies from 2026-11-15 up to that day.
 
 ## What works
 
@@ -32,8 +33,8 @@ HTTPS requests with `require "https"` (lua-https): the server's certificate is c
 against the system's CA bundle, and a server that fails the check gets no request.
 
 Tried so far: [Mr. Rescue](https://github.com/SimonLarsen/mrrescue) plays;
-[SNKRX](https://github.com/a327ex/SNKRX) starts and takes input once its Steam library is
-replaced by an empty one.
+[SNKRX](https://github.com/a327ex/SNKRX) starts from its unchanged files: LÖVE answers a
+game's request for Steam's library (`luasteam`) with an empty module.
 Balatro 1.0.1o starts from its unchanged game file (`love Balatro.exe`) and shows the main
 menu in fullscreen; a round is not tried yet.
 
@@ -62,7 +63,7 @@ See [docs/development.md](docs/development.md). In short:
     scripts/bootstrap.sh
     python3 scripts/deps.py aros-x86_64-abiv1-pc
     python3 scripts/build.py aros-x86_64-abiv1-pc
-    python3 scripts/package.py aros-x86_64-abiv1-pc 12.0-aros3
+    python3 scripts/package.py aros-x86_64-abiv1-pc 12.0-aros4
 
 ## Layout
 

@@ -1,0 +1,93 @@
+Title: A built-in empty luasteam module for games sold on Steam
+Repository: love
+Base: def245102c67909f9902095af613b1ae05249b62
+Requires: preceding patches in series
+Date: 2026-11-25
+Author: aros-loeve project
+Problem: Games sold on Steam load the module "luasteam", a native library that does not exist for AROS. Such a game stopped at start with "module 'luasteam' not found" until the user replaced the module by hand.
+Change: A searcher added at the end of package.loaders answers the name "luasteam" with a built-in module: init answers true, every other call exists and answers false, a few value calls answer an empty value of the right kind (name "", id "0", level 0, language "english"). A module the game brings itself is found first and stays in use. Present in every Lua state, so threads get it too.
+Scope: AROS (all targets)
+Upstream: local-only
+Verification: mainline x86_64, official nightly 2026-11-24 (live ISO), softpipe (pool v1-3), 2026-11-25: a game that requires luasteam gets the module (init true, calls answer false, value calls answer "0", 0, "english", unknown name spaces answer false, also inside a love.thread); a game with its own luasteam.lua gets its own; SNKRX at 6b93a64 with its files unchanged shows its main menu, started from the package through the Workbench requester. Not run: Balatro (it asks for Steam on Windows and macOS only), Raspberry Pi.
+Removal: when a Steam client library exists for AROS
+---
+diff --git a/src/modules/love/love.cpp b/src/modules/love/love.cpp
+index fa62f4f9e0ff8604c0ee0db0041be30ac492dbd3..f3e5a69d73dd53b455f55027b73af07a835b7201 100644
+--- a/src/modules/love/love.cpp
++++ b/src/modules/love/love.cpp
+@@ -532,6 +532,62 @@ static void luax_addcompatibilityalias(lua_State *L, const char *module, const c
+ 	lua_pop(L, 1);
+ }
+ 
++#ifdef LOVE_AROS
++/*
++ * Games sold on Steam ask for the module "luasteam", a native library that
++ * does not exist for AROS. This searcher is the last one in package.loaders,
++ * so a module the game brings itself wins; otherwise the game gets a module
++ * in which every call exists and reports "no Steam": init answers true so the
++ * game goes on, everything else answers false, or an empty value of the kind
++ * the real call gives.
++ */
++static const char aros_luasteam[] = R"luasteam(
++local function no() return false end
++local function space(values)
++	return setmetatable(values or {}, {
++		__index = function() return no end,
++		__call = no,
++	})
++end
++local function open()
++	local steam = {
++		init = function() return true end,
++		shutdown = function() end,
++		runCallbacks = function() end,
++		friends = space {
++			getFriendPersonaName = function() return "" end,
++			getPersonaName = function() return "" end,
++		},
++		user = space {
++			getSteamID = function() return "0" end,
++			getPlayerSteamLevel = function() return 0 end,
++			getGameBadgeLevel = function() return 0 end,
++		},
++		apps = space {
++			getCurrentGameLanguage = function() return "english" end,
++			getDLCCount = function() return 0 end,
++		},
++		utils = space {
++			getAppID = function() return 0 end,
++		},
++	}
++	return setmetatable(steam, {
++		__index = function(t, k)
++			local s = space()
++			rawset(t, k, s)
++			return s
++		end,
++	})
++end
++local loaders = package.loaders or package.searchers
++loaders[#loaders + 1] = function(name)
++	if name == "luasteam" then
++		return open
++	end
++end
++)luasteam";
++#endif
++
+ int luaopen_love(lua_State *L)
+ {
+ 	// Preload module loaders.
+@@ -691,6 +747,12 @@ int luaopen_love(lua_State *L)
+ 	});
+ #endif
+ 
++#ifdef LOVE_AROS
++	if (luaL_loadbuffer(L, aros_luasteam, sizeof(aros_luasteam) - 1, "=[love \"aros luasteam\"]") != 0
++		|| lua_pcall(L, 0, 0, 0) != 0)
++		lua_pop(L, 1);
++#endif
++
+ 	return 1;
+ }
+ 

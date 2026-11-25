@@ -8,7 +8,9 @@ This is a build of LÖVE @VERSION@ (upstream development branch, commit
 Needs
 -----
 
-  - @SYSTEM@, nightly build of 2026-11-15 or later
+  - @SYSTEM@, nightly build of 2026-11-24 or later. Programs built
+    for earlier nightlies do not run on these and the other way round;
+    for an earlier nightly use revision 3.
   - OpenGL (Mesa, part of the system)
   - AHI for sound, a TCP/IP stack for network games
 
@@ -49,12 +51,16 @@ What works
 
 Window and fullscreen, drawing (images, shapes, text, canvases, shaders),
 keyboard and mouse, sound (WAV, Ogg Vorbis, MP3, FLAC, tracker modules),
-game files and .love archives, threads, physics. Games run on LuaJIT.
+game files and .love archives, threads, physics. @LUA@
 
 Network: LuaSocket, ENet and HTTPS requests (require "https"). HTTPS checks
 the server's certificate against the system's certificate bundle.
 
 A game that asks for a window larger than the screen gets one that fits.
+
+A game sold on Steam that asks for Steam's library ("luasteam") starts
+without it: LÖVE answers with an empty one, so achievements and other Steam
+features do nothing.
 
 Known issues
 ------------
@@ -64,8 +70,7 @@ Known issues
   - Balatro on a GeForce GTX 980 (nvgfx driver, 4 GB of memory) stalls for
     ten to twenty seconds from time to time. Reported once, not reproduced
     yet; please report it if you see it.
-  - ffi.load and ffi.C cannot find functions (AROS has no dlopen).
-
+@TARGET_ISSUES@
 Please report problems: @REPOSITORY@/issues
 
 Licences
