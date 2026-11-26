@@ -12,6 +12,12 @@ the libraries it needs. LÖVE itself is not copied here.
 | mainline AROS, Raspberry Pi | released: the same on Lua 5.1 (no LuaJIT); tried in the emulator with threads, a real game, saves and Workbench start; sound not verified |
 | ABIv11 distributions, x86_64 | not started |
 
+![Mr. Rescue running in a window on AROS](docs/screenshots/mr-rescue.png)
+
+[Mr. Rescue](https://github.com/SimonLarsen/mrrescue) by Tangram Games (assets CC BY-SA 3.0) on mainline AROS x86_64. More:
+[choosing a game after a Workbench start](docs/screenshots/choose-a-game.png),
+[the same game on a Raspberry Pi](docs/screenshots/mr-rescue-raspberry-pi.png).
+
 LÖVE version: 12.0 (upstream `main`). It needs OpenGL 3.3 or OpenGL ES 3.0, which mainline
 AROS provides through Mesa. Revision 4 needs an AROS nightly of 2026-11-24 or later (a system
 structure changed that day and programs have to be built for one side of it); revision 3
